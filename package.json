@@ -1,0 +1,57 @@
+{
+  "name": "local-latex-workbench",
+  "version": "0.1.0",
+  "description": "A local-first LaTeX workspace with side-by-side source, PDF, and reviewable Codex edits.",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Ali Parchekani",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aliparchekan/local-latex-workbench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aliparchekan/local-latex-workbench/issues"
+  },
+  "homepage": "https://github.com/aliparchekan/local-latex-workbench#readme",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n ui,local -c cyan,green \"npm:dev:ui\" \"npm:dev:local\"",
+    "dev:ui": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev -p 3210",
+    "dev:local": "node server/index.mjs",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "start": "concurrently -k -n ui,local -c cyan,green \"npm:start:ui\" \"npm:start:local\"",
+    "start:ui": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start -p 3210",
+    "start:local": "node server/index.mjs",
+    "check": "tsc --noEmit && node --check server/index.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+  },
+  "dependencies": {
+    "concurrently": "^10.0.4",
+    "diff": "^9.0.0",
+    "lucide-react": "^1.28.0",
+    "next": "16.3.4",
+    "pdfjs-dist": "^6.2.108",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.54.3",
+    "@cloudflare/workers-types": "5.20260903.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.1.1",
+    "@vitejs/plugin-rsc": "0.5.34",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.3.4",
+    "react-server-dom-webpack": "19.2.8",
+    "typescript": "5.9.3",
+    "vinext": "1.0.0-beta.9",
+    "vite": "8.2.2",
+    "wrangler": "4.128.0"
+  },
+  "type": "module"
+}

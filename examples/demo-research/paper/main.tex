@@ -1,0 +1,66 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\title{A Reproducible Demonstration of a Thresholded Risk Model}
+\author{Demo Research Group}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This short paper accompanies a local research workspace used to test
+source-to-PDF selection, repository-aware editing, and approval-based LaTeX
+changes.  We describe a deliberately small nonlinear risk model whose numerical
+constants are shared with an executable Python implementation.  The example is
+simple enough to inspect quickly while still containing equations, citations,
+cross-references, a figure, and an included section.
+\end{abstract}
+
+\section{Introduction}
+Reproducible writing is easiest when a manuscript and its computational sources
+can be inspected together.  A reader may notice a numerical assumption in the
+rendered paper, select the relevant sentence, and ask whether the implementation
+uses the same value.  Conversely, a researcher who changes a constant in code
+should be able to locate every sentence and equation that depends on it.
+
+Our example follows the broad principle that assumptions should be explicit and
+checked against the analysis that produced the reported result
+\cite{gelman2013bayesian}.  It is not intended as a scientific claim.  Instead,
+it provides a compact fixture for testing coordinated edits.  Section~\ref{sec:method}
+defines the model, Figure~\ref{fig:pipeline} summarizes the workflow, and
+Section~\ref{sec:discussion} identifies useful modification tasks.
+
+\input{sections/method}
+
+\section{Discussion}
+\label{sec:discussion}
+The model is intentionally sensitive to small editorial changes.  For example,
+changing the offset from $0.8\,^{\circ}\mathrm{C}$ to a different calibration
+value requires an update to both the Python constant and Equation~\eqref{eq:linear}.
+Changing the decision threshold likewise affects the implementation and the
+interpretation of the final classification.  These dependencies make the
+workspace suitable for testing whether an editing agent can reason beyond the
+currently selected paragraph.
+
+The example also supports PDF-first interaction.  Selecting the displayed
+equation should map back to the corresponding source lines, while selecting the
+caption of Figure~\ref{fig:pipeline} should identify an ordinary prose region.
+After an accepted edit, recompilation can regenerate the PDF and SyncTeX index;
+after a rejected edit, the source should remain unchanged.
+
+\section{Conclusion}
+This demo combines a multi-file LaTeX paper with a small analysis program.  Its
+purpose is practical: it provides enough structure to exercise synchronized
+selection, citation handling, repository context, proposed diffs, approval, and
+undo without introducing external data or nonstandard build dependencies.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

@@ -1,0 +1,56 @@
+\section{Method}
+\label{sec:method}
+
+For observation $i$, let $t_i$ denote a temperature anomaly in degrees Celsius
+and let $r_i$ denote a standardized rainfall index.  The analysis first centers
+temperature using the offset $\delta=0.8$ and forms the linear signal
+\begin{equation}
+  \eta_i = 1.7\,(t_i-\delta) + 0.6r_i
+    + \log\!\left(\frac{0.12}{1-0.12}\right).
+  \label{eq:linear}
+\end{equation}
+The constants $1.7$, $0.8$, and $0.12$ correspond respectively to
+\texttt{SIGMOID\_\allowbreak STEEPNESS},
+\texttt{TEMPERATURE\_\allowbreak OFFSET\_\allowbreak C}, and
+\texttt{BASELINE\_\allowbreak RISK} in \texttt{analysis/model.py}.  Keeping
+these values visible in prose makes cross-file consistency straightforward to
+test.
+
+We transform the signal with the logistic function
+\begin{equation}
+  p_i = \frac{1}{1+\exp(-\eta_i)},
+  \label{eq:risk}
+\end{equation}
+so $0<p_i<1$.  An intervention is recommended when $p_i\geq 0.65$, matching
+the code constant \texttt{DECISION\_\allowbreak THRESHOLD}.  The implementation
+also records the seed value 17 for deterministic downstream examples, although
+the score in Equation~\eqref{eq:risk} itself contains no random component.
+
+\begin{figure}[htbp]
+  \centering
+  \fbox{\parbox{0.22\linewidth}{\centering
+    \textbf{Inputs}\\[3pt]
+    $t_i$ and $r_i$}}
+  \hspace{0.03\linewidth}
+  \rule[1.2ex]{0.08\linewidth}{0.5pt}
+  \hspace{0.03\linewidth}
+  \fbox{\parbox{0.22\linewidth}{\centering
+    \textbf{Risk model}\\[3pt]
+    $p_i=\operatorname{logit}^{-1}(\eta_i)$}}
+  \hspace{0.03\linewidth}
+  \rule[1.2ex]{0.08\linewidth}{0.5pt}
+  \hspace{0.03\linewidth}
+  \fbox{\parbox{0.22\linewidth}{\centering
+    \textbf{Decision}\\[3pt]
+    intervene if $p_i\geq0.65$}}
+  \caption{The demo pipeline from observed inputs to a thresholded decision.
+  The diagram uses only native LaTeX boxes and rules, so no generated image
+  asset is required.}
+  \label{fig:pipeline}
+\end{figure}
+
+This construction resembles a basic generalized linear model, but its role here
+is pedagogical.  The parameter values were chosen to create several meaningful
+selection targets rather than estimated from real observations.  A useful test
+prompt is to select the threshold sentence and request a simultaneous change to
+the manuscript and Python implementation.

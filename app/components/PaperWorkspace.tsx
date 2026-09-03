@@ -1,0 +1,2282 @@
+"use client";
+
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import {
+  ArrowUp,
+  Bot,
+  Check,
+  ChevronDown,
+  CircleAlert,
+  Copy,
+  FileCode2,
+  FolderOpen,
+  GitCompareArrows,
+  LoaderCircle,
+  MessageSquareText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Square,
+  Sparkles,
+  X,
+} from "lucide-react";
+import { api, LOCAL_API, relativeTo } from "../lib/api";
+import type { PdfFocus, ProjectInfo, SourceSelection } from "../lib/api";
+import { DiffViewer } from "./DiffViewer";
+import type { ApprovalReviewFile, ApprovalWriteTarget, PendingApproval } from "./DiffViewer";
+import { FileTree } from "./FileTree";
+import { PdfViewer } from "./PdfViewer";
+import type { PdfSelection } from "./PdfViewer";
+import { ResizeHandle } from "./ResizeHandle";
+import { SourceEditor } from "./SourceEditor";
+import type { SourceFocusRequest } from "./SourceEditor";
+
+type Health = {
+  ok: boolean;
+  codex?: { installed?: boolean; authenticated?: boolean; label?: string };
+  latex?: { installed?: boolean; label?: string };
+};
+
+type CompileResult = {
+  success: boolean;
+  buildId?: string;
+  pdfUrl?: string;
+  log?: string;
+  errors?: Array<string | { file?: string | null; line?: number | null; message?: string; severity?: string }>;
+  message?: string;
+};
+
+type FileReadResult = {
+  content: string;
+  hash: string;
+};
+
+type FileSaveResult = {
+  ok: boolean;
+  path: string;
+  hash: string;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+};
+
+type StreamEvent = {
+  type: string;
+  approvalType?: "file" | "permission";
+  threadId?: string;
+  turnId?: string;
+  text?: string;
+  label?: string;
+  message?: string;
+  diff?: string;
+  requestId?: string | number;
+  itemId?: string;
+  reason?: string | null;
+  files?: ApprovalReviewFile[];
+  writePaths?: string[];
+  writeTargets?: ApprovalWriteTarget[];
+  snapshotId?: string | null;
+  status?: string;
+  applied?: boolean;
+  undoAvailable?: boolean;
+};
+
+type ApplyStatus = {
+  snapshotId: string;
+  status: string;
+  applied: boolean;
+  undoAvailable: boolean;
+  message?: string;
+};
+
+type AgentTurnStatus = {
+  threadId: string;
+  turnId: string;
+  status: string;
+  label?: string;
+  startedAt: number;
+  lastActivityAt: number;
+};
+
+type AgentApprovalStatus = {
+  requestId: string | number;
+  approvalType?: "file" | "permission";
+  itemId?: string;
+  reason?: string | null;
+  diff?: string;
+  files?: ApprovalReviewFile[];
+  writePaths?: string[];
+  writeTargets?: ApprovalWriteTarget[];
+  expiresAt?: number;
+};
+
+type AgentStatusResponse = {
+  ok: boolean;
+  active: boolean;
+  turn: AgentTurnStatus | null;
+  approval: AgentApprovalStatus | null;
+};
+
+type StopTurnResponse = {
+  ok: boolean;
+  stopped: boolean;
+  threadId?: string | null;
+  turnId?: string | null;
+  status: "interrupting" | "idle";
+  approvalDeclined?: boolean;
+};
+
+type TurnMonitor = {
+  threadId: string | null;
+  turnId: string | null;
+  status: string;
+  startedAt: number;
+  lastActivityAt: number;
+};
+
+type ReviewReturnContext = {
+  path: string | null;
+  selection: SourceSelection | null;
+  focusLine: number | null;
+};
+
+type ActiveApply = {
+  requestId: string | number;
+  snapshotId: string | null;
+  approval: PendingApproval;
+  project: ProjectInfo;
+  mainFile: string | null;
+  returnContext: ReviewReturnContext | null;
+  deadline: number;
+  settled: boolean;
+};
+
+type ReasoningOption = {
+  reasoningEffort: string;
+  description: string;
+};
+
+type CodexSettings = {
+  model: string | null;
+  displayName: string | null;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: ReasoningOption[];
+};
+
+const LAST_PROJECT_KEY = "lattice:last-project";
+const threadKey = (root: string) => `lattice:thread:${root}`;
+const effortKey = (root: string) => `lattice:reasoning-effort:${root}`;
+const PANE_LAYOUT_KEY = "lattice:pane-layout:v1";
+const DEFAULT_PANES = { explorerWidth: 224, agentWidth: 370, sourceRatio: 0.42 };
+const EXPLORER_MIN = 160;
+const EXPLORER_MAX = 420;
+const AGENT_MIN = 280;
+const AGENT_MAX = 600;
+const SOURCE_MIN = 0.25;
+const SOURCE_MAX = 0.75;
+const PANE_HANDLE_SIZE = 7;
+const DOCUMENT_MIN = 500;
+const SOURCE_MIN_PX = 220;
+const PREVIEW_MIN_PX = 260;
+const STACKED_PANE_MIN_PX = 160;
+const APPROVAL_REQUEST_TIMEOUT_MS = 15_000;
+const APPLY_POLL_INTERVAL_MS = 750;
+const APPLY_RECOVERY_TIMEOUT_MS = 30_000;
+const APPLY_STATUS_REQUEST_TIMEOUT_MS = 5_000;
+const AGENT_STATUS_POLL_INTERVAL_MS = 1_500;
+const LONG_TURN_WARNING_MS = 45_000;
+
+type PaneLayout = typeof DEFAULT_PANES;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function validPaneLayout(value: unknown): PaneLayout | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<PaneLayout>;
+  if (
+    !Number.isFinite(candidate.explorerWidth)
+    || !Number.isFinite(candidate.agentWidth)
+    || !Number.isFinite(candidate.sourceRatio)
+  ) return null;
+  return {
+    explorerWidth: clamp(Number(candidate.explorerWidth), EXPLORER_MIN, EXPLORER_MAX),
+    agentWidth: clamp(Number(candidate.agentWidth), AGENT_MIN, AGENT_MAX),
+    sourceRatio: clamp(Number(candidate.sourceRatio), SOURCE_MIN, SOURCE_MAX),
+  };
+}
+
+function fitOuterPanes(layout: PaneLayout, width: number, explorerOpen: boolean) {
+  let explorerWidth = clamp(layout.explorerWidth, EXPLORER_MIN, EXPLORER_MAX);
+  let agentWidth = clamp(layout.agentWidth, AGENT_MIN, AGENT_MAX);
+  if (!width) return { explorerWidth, agentWidth };
+
+  if (!explorerOpen) {
+    const agentMax = Math.max(
+      AGENT_MIN,
+      Math.min(AGENT_MAX, width - DOCUMENT_MIN - PANE_HANDLE_SIZE),
+    );
+    return { explorerWidth, agentWidth: clamp(agentWidth, AGENT_MIN, agentMax) };
+  }
+
+  const available = Math.max(
+    EXPLORER_MIN + AGENT_MIN,
+    width - DOCUMENT_MIN - PANE_HANDLE_SIZE * 2,
+  );
+  let overflow = explorerWidth + agentWidth - available;
+  if (overflow > 0) {
+    const explorerReduction = Math.min(overflow, explorerWidth - EXPLORER_MIN);
+    explorerWidth -= explorerReduction;
+    overflow -= explorerReduction;
+  }
+  if (overflow > 0) agentWidth = Math.max(AGENT_MIN, agentWidth - overflow);
+  return { explorerWidth, agentWidth };
+}
+
+function sourceRatioBounds(extent: number, stacked: boolean) {
+  if (!extent) return { min: SOURCE_MIN, max: SOURCE_MAX };
+  const sourceMinimum = stacked ? STACKED_PANE_MIN_PX : SOURCE_MIN_PX;
+  const previewMinimum = stacked ? STACKED_PANE_MIN_PX : PREVIEW_MIN_PX;
+  const min = Math.max(SOURCE_MIN, sourceMinimum / extent);
+  const max = Math.min(SOURCE_MAX, (extent - PANE_HANDLE_SIZE - previewMinimum) / extent);
+  if (max < min) {
+    const midpoint = clamp(0.5, SOURCE_MIN, SOURCE_MAX);
+    return { min: midpoint, max: midpoint };
+  }
+  return { min, max };
+}
+
+function nameOf(path: string) {
+  return path.split("/").filter(Boolean).at(-1) || path;
+}
+
+function absoluteLocalPath(root: string, path: string) {
+  if (path.startsWith("/")) return path;
+  const base = root.replace(/\/+$/, "");
+  const relativePath = path.replace(/^\.\//, "").replace(/^\/+/, "");
+  return !relativePath || relativePath === "." ? base : `${base}/${relativePath}`;
+}
+
+function formatSaveTime(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(timestamp);
+}
+
+function withinPaper(project: ProjectInfo, path: string) {
+  const relativePath = relativeTo(project.researchRoot, path);
+  const paperPath = relativeTo(project.researchRoot, project.paperRoot).replace(/\/$/, "");
+  return !paperPath || paperPath === "." || relativePath === paperPath || relativePath.startsWith(`${paperPath}/`);
+}
+
+function paperMainCandidates(project: ProjectInfo) {
+  return project.texCandidates.filter((candidate) =>
+    candidate.paperPath === undefined ? withinPaper(project, candidate.path) : candidate.paperPath !== null,
+  );
+}
+
+function matchPaperMain(project: ProjectInfo, requested?: string | null) {
+  if (!requested) return null;
+  const normalized = relativeTo(project.researchRoot, requested).replace(/^\.\//, "");
+  const candidate = paperMainCandidates(project).find((entry) => {
+    const researchPath = relativeTo(project.researchRoot, entry.path).replace(/^\.\//, "");
+    const paperPath = entry.paperPath?.replace(/^\.\//, "");
+    return researchPath === normalized || paperPath === normalized;
+  });
+  return candidate ? relativeTo(project.researchRoot, candidate.path).replace(/^\.\//, "") : null;
+}
+
+function choosePaperMain(project: ProjectInfo, preferred?: string | null) {
+  return matchPaperMain(project, preferred)
+    ?? matchPaperMain(project, project.suggestedMain)
+    ?? paperMainCandidates(project)[0]?.path
+    ?? null;
+}
+
+function effortLabel(value: string) {
+  if (value === "xhigh") return "X-high";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function sourceSlice(content: string, startLine: number, endLine: number) {
+  return content.split("\n").slice(Math.max(0, startLine - 1), endLine).join("\n");
+}
+
+function absolutePdfUrl(url: string, buildId?: string) {
+  const base = url.startsWith("http") ? url : `${LOCAL_API}${url.startsWith("/") ? "" : "/"}${url}`;
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}build=${encodeURIComponent(buildId || Date.now().toString())}`;
+}
+
+function projectContainsFile(nodes: ProjectInfo["tree"], target: string): boolean {
+  for (const node of nodes) {
+    if (node.type === "file" && node.path === target) return true;
+    if (node.children && projectContainsFile(node.children, target)) return true;
+  }
+  return false;
+}
+
+function remapReviewedPath(path: string | null, files: ApprovalReviewFile[]) {
+  if (!path) return null;
+  const change = files.find((file) => file.path === path);
+  if (!change) return path;
+  if (change.kind === "delete") return null;
+  return change.movePath ?? path;
+}
+
+function applyStillRunning(status: string) {
+  return ["pending", "finalizing", "inProgress", "applying"].includes(status);
+}
+
+function formatElapsed(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+export function PaperWorkspace() {
+  const [health, setHealth] = useState<Health | null>(null);
+  const [project, setProject] = useState<ProjectInfo | null>(null);
+  const [mainFile, setMainFile] = useState<string | null>(null);
+  const [activePath, setActivePath] = useState<string | null>(null);
+  const [content, setContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [lastSuccessfulSaveAt, setLastSuccessfulSaveAt] = useState<number | null>(null);
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const [selection, setSelection] = useState<SourceSelection | null>(null);
+  const [sourceFocusRequest, setSourceFocusRequest] = useState<SourceFocusRequest | null>(null);
+  const [pdfFocus, setPdfFocus] = useState<PdfFocus | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [buildId, setBuildId] = useState<string | null>(null);
+  const [compiling, setCompiling] = useState(false);
+  const [compileErrors, setCompileErrors] = useState<string[]>([]);
+  const [compileLog, setCompileLog] = useState("");
+  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [prompt, setPrompt] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentStatus, setAgentStatus] = useState("Ready");
+  const [turnMonitor, setTurnMonitor] = useState<TurnMonitor | null>(null);
+  const [turnClock, setTurnClock] = useState(() => Date.now());
+  const [stoppingTurn, setStoppingTurn] = useState(false);
+  const [codexSettings, setCodexSettings] = useState<CodexSettings | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [latestDiff, setLatestDiff] = useState("");
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalApplying, setApprovalApplying] = useState(false);
+  const [applyConfirmationDelayed, setApplyConfirmationDelayed] = useState(false);
+  const [applyConfirmationMessage, setApplyConfirmationMessage] = useState<string | null>(null);
+  const [refreshingAfterApply, setRefreshingAfterApply] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState(false);
+  const [paneLayout, setPaneLayout] = useState<PaneLayout>(DEFAULT_PANES);
+  const [paneLayoutLoaded, setPaneLayoutLoaded] = useState(false);
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const [splitExtent, setSplitExtent] = useState(0);
+  const [sourceStacked, setSourceStacked] = useState(false);
+  const [outerResizable, setOuterResizable] = useState(true);
+  const [activeResize, setActiveResize] = useState<"columns" | "rows" | null>(null);
+  const projectRef = useRef<ProjectInfo | null>(null);
+  const activePathRef = useRef<string | null>(null);
+  const contentRef = useRef("");
+  const savedContentRef = useRef("");
+  const fileHashRef = useRef<string | null>(null);
+  const sourceFocusIdRef = useRef(0);
+  const saveTimesRef = useRef(new Map<string, number>());
+  const saveQueueRef = useRef<Promise<boolean> | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const agentStatusInFlightRef = useRef(false);
+  const turnMonitorRef = useRef<TurnMonitor | null>(null);
+  const initializedRef = useRef(false);
+  const activeApplyRef = useRef<ActiveApply | null>(null);
+  const applyPollTimerRef = useRef<number | null>(null);
+  const applyStatusInFlightRef = useRef(false);
+  const reviewReturnContextRef = useRef<ReviewReturnContext | null>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const workspaceGridRef = useRef<HTMLDivElement | null>(null);
+  const documentSplitRef = useRef<HTMLDivElement | null>(null);
+  const explorerDragStartRef = useRef(DEFAULT_PANES.explorerWidth);
+  const agentDragStartRef = useRef(DEFAULT_PANES.agentWidth);
+  const sourceDragStartRef = useRef({
+    ratio: DEFAULT_PANES.sourceRatio,
+    extent: 1,
+    min: SOURCE_MIN,
+    max: SOURCE_MAX,
+  });
+
+  const replaceProject = useCallback((value: ProjectInfo | null) => {
+    projectRef.current = value;
+    setProject(value);
+  }, []);
+
+  const replaceActivePath = useCallback((value: string | null) => {
+    activePathRef.current = value;
+    setActivePath(value);
+  }, []);
+
+  const replaceContent = useCallback((value: string) => {
+    contentRef.current = value;
+    setContent(value);
+  }, []);
+
+  const replaceSavedContent = useCallback((value: string) => {
+    savedContentRef.current = value;
+    setSavedContent(value);
+  }, []);
+
+  const focusSourceLine = useCallback((line: number | null) => {
+    if (line === null) {
+      setSourceFocusRequest(null);
+      return;
+    }
+    sourceFocusIdRef.current += 1;
+    setSourceFocusRequest({ id: sourceFocusIdRef.current, line });
+  }, []);
+
+  const dirty = activePath !== null && content !== savedContent;
+  const activeReadOnly = refreshingAfterApply
+    || Boolean(project && activePath && !withinPaper(project, activePath));
+  const activeReviewFile = pendingApproval?.files?.find(
+    (file) => file.path === activePath || (file.movePath != null && file.movePath === activePath),
+  ) ?? null;
+  const fittedPanes = fitOuterPanes(paneLayout, workspaceWidth, explorerOpen);
+  const ratioBounds = sourceRatioBounds(splitExtent, sourceStacked);
+  const effectiveSourceRatio = clamp(paneLayout.sourceRatio, ratioBounds.min, ratioBounds.max);
+  const turnElapsed = turnMonitor ? Math.max(0, turnClock - turnMonitor.startedAt) : 0;
+  const turnActive = turnMonitor !== null;
+  const turnTakingLong = turnElapsed >= LONG_TURN_WARNING_MS && !pendingApproval;
+  const turnInterruptible = Boolean(turnMonitor?.turnId);
+  const stopLockedForApply = approvalApplying || applyConfirmationDelayed || refreshingAfterApply;
+  const activeSourceDiskPath = project && activePath
+    ? absoluteLocalPath(project.researchRoot, activePath)
+    : null;
+
+  const setMonitoredTurn = useCallback((turn: TurnMonitor | null) => {
+    turnMonitorRef.current = turn;
+    setTurnMonitor(turn);
+    if (turn) setTurnClock(Date.now());
+  }, []);
+
+  const beginMonitoredTurn = useCallback((threadId: string | null) => {
+    const startedAt = Date.now();
+    setMonitoredTurn({
+      threadId,
+      turnId: null,
+      status: "Starting Codex…",
+      startedAt,
+      lastActivityAt: startedAt,
+    });
+    return startedAt;
+  }, [setMonitoredTurn]);
+
+  useEffect(() => {
+    let restored: PaneLayout | null = null;
+    try {
+      const stored = localStorage.getItem(PANE_LAYOUT_KEY);
+      if (stored) restored = validPaneLayout(JSON.parse(stored));
+    } catch {
+      // Keep defaults when browser storage is unavailable or malformed.
+    }
+    const timeout = window.setTimeout(() => {
+      if (restored) setPaneLayout(restored);
+      setPaneLayoutLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  useEffect(() => {
+    if (!paneLayoutLoaded) return;
+    const timeout = window.setTimeout(() => {
+      try {
+        localStorage.setItem(PANE_LAYOUT_KEY, JSON.stringify(paneLayout));
+      } catch {
+        // Layout persistence is optional when browser storage is unavailable.
+      }
+    }, 120);
+    return () => window.clearTimeout(timeout);
+  }, [paneLayout, paneLayoutLoaded]);
+
+  useEffect(() => {
+    const stackedQuery = window.matchMedia("(max-width: 820px)");
+    const compactQuery = window.matchMedia("(max-width: 1060px)");
+    const update = () => {
+      setSourceStacked(stackedQuery.matches);
+      setOuterResizable(!compactQuery.matches);
+    };
+    update();
+    stackedQuery.addEventListener("change", update);
+    compactQuery.addEventListener("change", update);
+    return () => {
+      stackedQuery.removeEventListener("change", update);
+      compactQuery.removeEventListener("change", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    const workspaceNode = workspaceGridRef.current;
+    const splitNode = documentSplitRef.current;
+    if (!workspaceNode || !splitNode) return;
+
+    const measure = () => {
+      setWorkspaceWidth(Math.round(workspaceNode.getBoundingClientRect().width));
+      const splitRect = splitNode.getBoundingClientRect();
+      setSplitExtent(Math.round(sourceStacked ? splitRect.height : splitRect.width));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(workspaceNode);
+    observer.observe(splitNode);
+    return () => observer.disconnect();
+  }, [sourceStacked]);
+
+  useEffect(() => {
+    if (!turnActive) return;
+    const timer = window.setInterval(() => setTurnClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [turnActive]);
+
+  const scrollChatToEnd = useCallback(() => {
+    const chat = chatScrollRef.current;
+    if (chat) chat.scrollTop = chat.scrollHeight;
+  }, []);
+
+  useLayoutEffect(() => {
+    scrollChatToEnd();
+  }, [agentBusy, buildId, compiling, latestDiff, messages, pendingApproval, scrollChatToEnd, turnMonitor]);
+
+  useEffect(() => {
+    const chat = chatScrollRef.current;
+    if (!chat || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(scrollChatToEnd);
+    observer.observe(chat);
+    return () => observer.disconnect();
+  }, [pendingApproval, scrollChatToEnd]);
+
+  const openFile = useCallback(async (path: string, currentProject?: ProjectInfo) => {
+    const targetProject = currentProject ?? project;
+    if (!targetProject) return "";
+    const normalizedPath = relativeTo(targetProject.researchRoot, path);
+    const result = await api<FileReadResult>(
+      `/api/file?researchRoot=${encodeURIComponent(targetProject.researchRoot)}&path=${encodeURIComponent(normalizedPath)}`,
+    );
+    replaceActivePath(normalizedPath);
+    replaceContent(result.content);
+    replaceSavedContent(result.content);
+    fileHashRef.current = result.hash;
+    setLastSuccessfulSaveAt(
+      saveTimesRef.current.get(absoluteLocalPath(targetProject.researchRoot, normalizedPath)) ?? null,
+    );
+    setSelection(null);
+    setSourceFocusRequest(null);
+    return result.content;
+  }, [project, replaceActivePath, replaceContent, replaceSavedContent]);
+
+  const showReviewFile = useCallback((file: ApprovalReviewFile) => {
+    replaceActivePath(file.path);
+    replaceContent(file.before);
+    replaceSavedContent(file.before);
+    fileHashRef.current = null;
+    setLastSuccessfulSaveAt(null);
+    setSelection(null);
+    setSourceFocusRequest(null);
+  }, [replaceActivePath, replaceContent, replaceSavedContent]);
+
+  const restoreReviewContext = useCallback(async (
+    targetProject: ProjectInfo,
+    context: ReviewReturnContext | null,
+  ) => {
+    setPendingApproval(null);
+    setApplyConfirmationDelayed(false);
+    setApplyConfirmationMessage(null);
+    reviewReturnContextRef.current = null;
+    if (context?.path) {
+      await openFile(context.path, targetProject);
+      setSelection(context.selection);
+      focusSourceLine(context.focusLine);
+    } else {
+      replaceActivePath(null);
+      replaceContent("");
+      replaceSavedContent("");
+      fileHashRef.current = null;
+      setSelection(null);
+      setSourceFocusRequest(null);
+    }
+  }, [focusSourceLine, openFile, replaceActivePath, replaceContent, replaceSavedContent]);
+
+  const recoverApproval = useCallback((approval: AgentApprovalStatus) => {
+    if (activeApplyRef.current) return;
+    if (pendingApproval && String(pendingApproval.id) === String(approval.requestId)) return;
+    const approvalType = approval.approvalType ?? "file";
+    const recovered: PendingApproval = {
+      id: approval.requestId,
+      approvalType,
+      itemId: approval.itemId,
+      reason: approval.reason,
+      diff: approval.diff ?? "",
+      files: approval.files ?? [],
+      writePaths: approval.writePaths ?? [],
+      writeTargets: approval.writeTargets ?? [],
+    };
+    if (approvalType === "file") {
+      reviewReturnContextRef.current = {
+        path: activePath,
+        selection,
+        focusLine: sourceFocusRequest?.line ?? null,
+      };
+    }
+    setPendingApproval(recovered);
+    setApplyConfirmationDelayed(false);
+    setApplyConfirmationMessage(null);
+    if (approvalType === "file" && recovered.files?.[0]) showReviewFile(recovered.files[0]);
+    setAgentStatus(approvalType === "permission"
+      ? "Waiting for research access approval"
+      : "Waiting for your review");
+  }, [activePath, pendingApproval, selection, showReviewFile, sourceFocusRequest]);
+
+  const pollAgentStatus = useCallback(async (targetProject?: ProjectInfo | null) => {
+    const statusProject = targetProject ?? project;
+    if (!statusProject || agentStatusInFlightRef.current) return;
+    agentStatusInFlightRef.current = true;
+    try {
+      const storedThread = localStorage.getItem(threadKey(statusProject.researchRoot));
+      const result = await api<AgentStatusResponse>("/api/agent/status", {
+        method: "POST",
+        body: JSON.stringify({
+          researchRoot: statusProject.researchRoot,
+          paperRoot: statusProject.paperRoot,
+          threadId: storedThread,
+        }),
+      });
+      if (result.turn?.threadId) {
+        localStorage.setItem(threadKey(statusProject.researchRoot), result.turn.threadId);
+      }
+      if (result.active && result.turn) {
+        setMonitoredTurn({
+          threadId: result.turn.threadId,
+          turnId: result.turn.turnId,
+          status: result.turn.label ?? result.turn.status,
+          startedAt: result.turn.startedAt,
+          lastActivityAt: result.turn.lastActivityAt,
+        });
+        setAgentBusy(true);
+        if (!result.approval) setAgentStatus(result.turn.label ?? result.turn.status);
+      } else {
+        const localTurn = turnMonitorRef.current;
+        const activeStream = streamAbortRef.current;
+        const justStarted = Boolean(
+          activeStream
+          && localTurn
+          && !localTurn.turnId
+          && Date.now() - localTurn.startedAt < 5_000,
+        );
+        if (!justStarted) {
+          setMonitoredTurn(null);
+          activeStream?.abort();
+          if (streamAbortRef.current === activeStream) streamAbortRef.current = null;
+          setAgentBusy(false);
+          if (!pendingApproval && !activeApplyRef.current) setAgentStatus("Ready");
+        }
+      }
+      if (result.approval) {
+        recoverApproval(result.approval);
+      } else if (pendingApproval && !approvalBusy && !activeApplyRef.current) {
+        if (pendingApproval.approvalType === "permission") {
+          setPendingApproval(null);
+        } else {
+          await restoreReviewContext(statusProject, reviewReturnContextRef.current);
+        }
+        if (!result.active) setAgentStatus("Ready");
+      }
+    } catch {
+      // The active stream remains authoritative while a status check is unavailable.
+    } finally {
+      agentStatusInFlightRef.current = false;
+    }
+  }, [approvalBusy, pendingApproval, project, recoverApproval, restoreReviewContext, setMonitoredTurn]);
+
+  const saveNow = useCallback(async (): Promise<boolean> => {
+    if (saveQueueRef.current) return saveQueueRef.current;
+    const currentProject = projectRef.current;
+    const currentPath = activePathRef.current;
+    if (!currentProject || !currentPath || contentRef.current === savedContentRef.current) return true;
+    if (!withinPaper(currentProject, currentPath)) {
+      setError("This research-context file is read only and cannot be saved from the paper editor.");
+      return false;
+    }
+
+    setSaving(true);
+    const operation = (async () => {
+      try {
+        while (true) {
+          const targetProject = projectRef.current;
+          const targetPath = activePathRef.current;
+          const targetContent = contentRef.current;
+          const targetSavedContent = savedContentRef.current;
+          const expectedHash = fileHashRef.current;
+          if (!targetProject || !targetPath || targetContent === targetSavedContent) return true;
+          if (!withinPaper(targetProject, targetPath)) {
+            throw new Error("This research-context file is read only and cannot be saved from the paper editor.");
+          }
+
+          const targetResearchRoot = targetProject.researchRoot;
+          const targetPaperRoot = targetProject.paperRoot;
+          const result = await api<FileSaveResult>("/api/file", {
+            method: "PUT",
+            body: JSON.stringify({
+              researchRoot: targetResearchRoot,
+              paperRoot: targetPaperRoot,
+              path: targetPath,
+              content: targetContent,
+              expectedHash,
+            }),
+          });
+
+          const latestProject = projectRef.current;
+          if (
+            !latestProject
+            || latestProject.researchRoot !== targetResearchRoot
+            || latestProject.paperRoot !== targetPaperRoot
+            || activePathRef.current !== targetPath
+          ) {
+            setError("The previous file finished saving after the editor moved elsewhere. The current buffer was left untouched.");
+            return false;
+          }
+          replaceSavedContent(targetContent);
+          fileHashRef.current = result.hash;
+          const savedAt = Date.now();
+          saveTimesRef.current.set(absoluteLocalPath(targetResearchRoot, targetPath), savedAt);
+          setLastSuccessfulSaveAt(savedAt);
+        }
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Could not save the source file");
+        return false;
+      }
+    })();
+    saveQueueRef.current = operation;
+    try {
+      return await operation;
+    } finally {
+      if (saveQueueRef.current === operation) saveQueueRef.current = null;
+      setSaving(false);
+    }
+  }, [replaceSavedContent]);
+
+  const openFileAfterSave = useCallback(async (path: string, currentProject?: ProjectInfo) => {
+    if (!(await saveNow())) return null;
+    return openFile(path, currentProject);
+  }, [openFile, saveNow]);
+
+  const compile = useCallback(async (override?: { project?: ProjectInfo; mainFile?: string }) => {
+    if (!(await saveNow())) return false;
+    const targetProject = override?.project ?? project;
+    const targetMain = override?.mainFile ?? mainFile;
+    if (!targetProject || !targetMain) return false;
+    const normalizedMain = matchPaperMain(targetProject, targetMain);
+    if (!normalizedMain) {
+      setError("Choose a main .tex file from inside the selected paper folder.");
+      return false;
+    }
+    setCompiling(true);
+    setCompileErrors([]);
+    setError(null);
+    try {
+      const result = await api<CompileResult>("/api/compile", {
+        method: "POST",
+        body: JSON.stringify({
+          researchRoot: targetProject.researchRoot,
+          paperRoot: targetProject.paperRoot,
+          mainFile: normalizedMain,
+        }),
+      });
+      setCompileLog(result.log ?? "");
+      setCompileErrors((result.errors ?? []).map((entry) => {
+        if (typeof entry === "string") return entry;
+        const location = [entry.file, entry.line].filter(Boolean).join(":");
+        return `${location ? `${location}: ` : ""}${entry.message ?? "LaTeX issue"}`;
+      }));
+      if (result.pdfUrl) {
+        const nextBuildId = result.buildId ?? Date.now().toString();
+        setBuildId(nextBuildId);
+        setPdfUrl(absolutePdfUrl(result.pdfUrl, nextBuildId));
+      }
+      if (!result.success && !result.pdfUrl) {
+        setError(result.message || "LaTeX could not produce a PDF. Open the build log for details.");
+      }
+      return result.success;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Compilation failed");
+      return false;
+    } finally {
+      setCompiling(false);
+    }
+  }, [mainFile, project, saveNow]);
+
+  const openProject = useCallback(async (researchRoot: string, paperRoot: string, preferredMain?: string) => {
+    if (!(await saveNow())) return null;
+    setError(null);
+    const next = await api<ProjectInfo>("/api/project/open", {
+      method: "POST",
+      body: JSON.stringify({ researchRoot, paperRoot }),
+    });
+    setLastSuccessfulSaveAt(null);
+    replaceProject(next);
+    const nextMain = choosePaperMain(next, preferredMain);
+    setMainFile(nextMain);
+    localStorage.setItem(LAST_PROJECT_KEY, JSON.stringify({
+      researchRoot: next.researchRoot,
+      paperRoot: next.paperRoot,
+      mainFile: nextMain,
+    }));
+    if (nextMain) {
+      await openFile(nextMain, next);
+      await compile({ project: next, mainFile: nextMain });
+    } else {
+      replaceActivePath(null);
+      replaceContent("");
+      replaceSavedContent("");
+      fileHashRef.current = null;
+    }
+    return next;
+  }, [compile, openFile, replaceActivePath, replaceContent, replaceProject, replaceSavedContent, saveNow]);
+
+  const refreshProjectAfterApply = useCallback(async (activeApply: ActiveApply) => {
+    const { project: previousProject, approval, returnContext } = activeApply;
+    const next = await api<ProjectInfo>("/api/project/open", {
+      method: "POST",
+      body: JSON.stringify({
+        researchRoot: previousProject.researchRoot,
+        paperRoot: previousProject.paperRoot,
+      }),
+    });
+    const reviewFiles = approval.files ?? [];
+    const preferredMain = remapReviewedPath(activeApply.mainFile, reviewFiles);
+    const nextMain = choosePaperMain(next, preferredMain);
+    replaceProject(next);
+    setMainFile(nextMain);
+    localStorage.setItem(LAST_PROJECT_KEY, JSON.stringify({
+      researchRoot: next.researchRoot,
+      paperRoot: next.paperRoot,
+      mainFile: nextMain,
+    }));
+
+    const requestedPath = remapReviewedPath(returnContext?.path ?? null, reviewFiles);
+    const nextPath = requestedPath && projectContainsFile(next.tree, requestedPath)
+      ? requestedPath
+      : nextMain && projectContainsFile(next.tree, nextMain)
+        ? nextMain
+        : null;
+    if (nextPath) {
+      await openFile(nextPath, next);
+      const returnPathChanged = reviewFiles.some((file) => file.path === returnContext?.path);
+      if (!returnPathChanged && nextPath === returnContext?.path) {
+        setSelection(returnContext.selection);
+        focusSourceLine(returnContext.focusLine);
+      }
+    } else {
+      replaceActivePath(null);
+      replaceContent("");
+      replaceSavedContent("");
+      fileHashRef.current = null;
+      setSelection(null);
+      setSourceFocusRequest(null);
+    }
+    return { project: next, mainFile: nextMain };
+  }, [focusSourceLine, openFile, replaceActivePath, replaceContent, replaceProject, replaceSavedContent]);
+
+  const clearApplyPolling = useCallback(() => {
+    if (applyPollTimerRef.current !== null) {
+      window.clearInterval(applyPollTimerRef.current);
+      applyPollTimerRef.current = null;
+    }
+  }, []);
+
+  const readApplyStatus = useCallback(async (activeApply: ActiveApply) => {
+    if (!activeApply.snapshotId) return null;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), APPLY_STATUS_REQUEST_TIMEOUT_MS);
+    try {
+      return await api<ApplyStatus>("/api/changes/status", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          researchRoot: activeApply.project.researchRoot,
+          paperRoot: activeApply.project.paperRoot,
+          snapshotId: activeApply.snapshotId,
+        }),
+      });
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
+  const settleActiveApply = useCallback((settlement: ApplyStatus) => {
+    const activeApply = activeApplyRef.current;
+    if (!activeApply || activeApply.settled) return false;
+    if (
+      activeApply.snapshotId
+      && settlement.snapshotId
+      && activeApply.snapshotId !== settlement.snapshotId
+    ) return false;
+
+    activeApply.settled = true;
+    if (!activeApply.snapshotId && settlement.snapshotId) activeApply.snapshotId = settlement.snapshotId;
+    activeApplyRef.current = null;
+    clearApplyPolling();
+    applyStatusInFlightRef.current = false;
+    setApprovalBusy(false);
+    setApprovalApplying(false);
+    setApplyConfirmationDelayed(false);
+    setApplyConfirmationMessage(null);
+    setPendingApproval(null);
+    reviewReturnContextRef.current = null;
+    if (settlement.undoAvailable) setCanUndo(true);
+    if (settlement.message) setError(settlement.message);
+    setAgentStatus(settlement.applied ? "Change applied" : "Change finished");
+
+    setRefreshingAfterApply(true);
+    const changeApplied = settlement.applied;
+    void refreshProjectAfterApply(activeApply)
+      .then((refreshed) => {
+        setRefreshingAfterApply(false);
+        const refreshedPath = activePathRef.current;
+        if (changeApplied && refreshedPath) {
+          const savedAt = Date.now();
+          saveTimesRef.current.set(
+            absoluteLocalPath(refreshed.project.researchRoot, refreshedPath),
+            savedAt,
+          );
+          setLastSuccessfulSaveAt(savedAt);
+        }
+        if (refreshed.mainFile) {
+          void compile({ project: refreshed.project, mainFile: refreshed.mainFile });
+        }
+      })
+      .catch((reason) => {
+        setRefreshingAfterApply(false);
+        replaceActivePath(null);
+        replaceContent("");
+        replaceSavedContent("");
+        fileHashRef.current = null;
+        setSelection(null);
+        setSourceFocusRequest(null);
+        setError(reason instanceof Error ? reason.message : "The paper changed, but its files could not be refreshed.");
+      });
+
+    return true;
+  }, [clearApplyPolling, compile, refreshProjectAfterApply, replaceActivePath, replaceContent, replaceSavedContent]);
+
+  const markApplyConfirmationDelayed = useCallback((message: string) => {
+    const activeApply = activeApplyRef.current;
+    if (!activeApply || activeApply.settled) return;
+    setApprovalBusy(false);
+    setApprovalApplying(false);
+    setApplyConfirmationDelayed(true);
+    setApplyConfirmationMessage(message);
+    setAgentStatus("Apply confirmation delayed");
+  }, []);
+
+  const checkApplyStatus = useCallback(async (manual = false) => {
+    const activeApply = activeApplyRef.current;
+    if (!activeApply || activeApply.settled) return;
+    if (!activeApply.snapshotId) {
+      markApplyConfirmationDelayed(
+        "No apply receipt was received. Keep this review open while Codex finishes, then reload the paper if confirmation does not arrive.",
+      );
+      return;
+    }
+    if (applyStatusInFlightRef.current) return;
+    applyStatusInFlightRef.current = true;
+    if (manual) {
+      setApprovalBusy(true);
+      setAgentStatus("Checking apply status…");
+    }
+    try {
+      const status = await readApplyStatus(activeApply);
+      if (activeApplyRef.current !== activeApply || activeApply.settled || !status) return;
+      if (!applyStillRunning(status.status)) {
+        settleActiveApply(status);
+        return;
+      }
+      if (Date.now() >= activeApply.deadline || manual) {
+        clearApplyPolling();
+        markApplyConfirmationDelayed(
+          status.message ?? "Codex is still applying this change. Check again before editing the reviewed source.",
+        );
+      }
+    } catch (reason) {
+      if (activeApplyRef.current !== activeApply || activeApply.settled) return;
+      if (Date.now() >= activeApply.deadline || manual) {
+        clearApplyPolling();
+        const timedOut = reason instanceof DOMException && reason.name === "AbortError";
+        markApplyConfirmationDelayed(timedOut
+          ? "The local status check timed out. Check again before editing the reviewed source."
+          : "Apply status could not be confirmed. Check again before editing the reviewed source.");
+      }
+    } finally {
+      applyStatusInFlightRef.current = false;
+      if (manual) setApprovalBusy(false);
+    }
+  }, [clearApplyPolling, markApplyConfirmationDelayed, readApplyStatus, settleActiveApply]);
+
+  const checkApplyStatusRef = useRef(checkApplyStatus);
+  useEffect(() => {
+    checkApplyStatusRef.current = checkApplyStatus;
+  }, [checkApplyStatus]);
+
+  const startApplyPolling = useCallback((activeApply: ActiveApply) => {
+    clearApplyPolling();
+    activeApply.deadline = Date.now() + APPLY_RECOVERY_TIMEOUT_MS;
+    void checkApplyStatusRef.current(false);
+    applyPollTimerRef.current = window.setInterval(() => {
+      const current = activeApplyRef.current;
+      if (!current || current !== activeApply || current.settled) {
+        clearApplyPolling();
+        return;
+      }
+      if (Date.now() >= current.deadline) {
+        clearApplyPolling();
+        markApplyConfirmationDelayed(
+          "Applying is taking longer than expected. Check status before editing the reviewed source.",
+        );
+        return;
+      }
+      void checkApplyStatusRef.current(false);
+    }, APPLY_POLL_INTERVAL_MS);
+  }, [clearApplyPolling, markApplyConfirmationDelayed]);
+
+  useEffect(() => () => {
+    streamAbortRef.current?.abort();
+    clearApplyPolling();
+    if (copyFeedbackTimerRef.current !== null) window.clearTimeout(copyFeedbackTimerRef.current);
+  }, [clearApplyPolling]);
+
+  useEffect(() => {
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+    let active = true;
+    async function connect() {
+      try {
+        const nextHealth = await api<Health>("/api/health");
+        if (!active) return;
+        setHealth(nextHealth);
+        const stored = localStorage.getItem(LAST_PROJECT_KEY);
+        if (stored) {
+          const value = JSON.parse(stored) as { researchRoot: string; paperRoot: string; mainFile?: string };
+          try {
+            await openProject(value.researchRoot, value.paperRoot, value.mainFile);
+          } catch {
+            localStorage.removeItem(LAST_PROJECT_KEY);
+          }
+        }
+      } catch {
+        if (active) setHealth({ ok: false });
+      }
+    }
+    connect();
+    return () => { active = false; };
+  }, [compile, openFile, openProject]);
+
+  useEffect(() => {
+    if (!project) return;
+    const initialCheck = window.setTimeout(() => {
+      void pollAgentStatus(project);
+    }, 0);
+    if (!agentBusy && !turnActive) {
+      return () => window.clearTimeout(initialCheck);
+    }
+    const timer = window.setInterval(() => {
+      void pollAgentStatus(project);
+    }, AGENT_STATUS_POLL_INTERVAL_MS);
+    return () => {
+      window.clearTimeout(initialCheck);
+      window.clearInterval(timer);
+    };
+  }, [agentBusy, pollAgentStatus, project, turnActive]);
+
+  useEffect(() => {
+    if (!project) return;
+    let active = true;
+    api<CodexSettings>(`/api/codex/settings?researchRoot=${encodeURIComponent(project.researchRoot)}`)
+      .then((settings) => {
+        if (!active) return;
+        setCodexSettings(settings);
+        const stored = localStorage.getItem(effortKey(project.researchRoot)) ?? "";
+        const supported = settings.supportedReasoningEfforts.some(
+          (option) => option.reasoningEffort === stored,
+        );
+        setReasoningEffort(supported ? stored : "");
+      })
+      .catch(() => {
+        if (active) setCodexSettings(null);
+      });
+    return () => { active = false; };
+  }, [project]);
+
+  const chooseWorkspace = async () => {
+    if (agentBusy || pendingApproval) return;
+    if (!(await saveNow())) return;
+    setError(null);
+    try {
+      const research = await api<{ path?: string; canceled?: boolean }>("/api/folder/pick", {
+        method: "POST",
+        body: JSON.stringify({ title: "Choose the research folder containing your paper and code" }),
+      });
+      if (!research.path || research.canceled) return;
+      const paper = await api<{ path?: string; canceled?: boolean }>("/api/folder/pick", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Choose the paper folder (you may choose the research folder itself)",
+          initialPath: research.path,
+        }),
+      });
+      await openProject(research.path, paper.path && !paper.canceled ? paper.path : research.path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not open that workspace");
+    }
+  };
+
+  const choosePaperFolder = async () => {
+    if (!project || agentBusy || pendingApproval) return;
+    if (!(await saveNow())) return;
+    try {
+      const result = await api<{ path?: string; canceled?: boolean }>("/api/folder/pick", {
+        method: "POST",
+        body: JSON.stringify({ title: "Choose the paper folder", initialPath: project.paperRoot }),
+      });
+      if (result.path && !result.canceled) await openProject(project.researchRoot, result.path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not change the paper folder");
+    }
+  };
+
+  const copyLocalPath = useCallback(async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(path);
+      setCopiedPath(path);
+      if (copyFeedbackTimerRef.current !== null) window.clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopiedPath((current) => current === path ? null : current);
+        copyFeedbackTimerRef.current = null;
+      }, 1_600);
+    } catch {
+      setError("Could not copy the local file path.");
+    }
+  }, []);
+
+  const revealLocalDestination = useCallback(async () => {
+    if (!project) return;
+    const revealFile = activePath
+      && !activeReviewFile
+      && !activeReadOnly
+      && withinPaper(project, activePath)
+      && projectContainsFile(project.tree, activePath)
+      ? activePath
+      : null;
+    try {
+      await api("/api/folder/reveal", {
+        method: "POST",
+        body: JSON.stringify({
+          researchRoot: project.researchRoot,
+          paperRoot: project.paperRoot,
+          ...(revealFile ? { path: revealFile } : {}),
+        }),
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not show the local save destination.");
+    }
+  }, [activePath, activeReadOnly, activeReviewFile, project]);
+
+  useEffect(() => {
+    if (!dirty || activeReadOnly) return;
+    const timer = window.setTimeout(() => { saveNow(); }, 700);
+    return () => window.clearTimeout(timer);
+  }, [activeReadOnly, dirty, saveNow]);
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!dirty && !saving) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [dirty, saving]);
+
+  useEffect(() => {
+    const saveShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      void saveNow();
+    };
+    window.addEventListener("keydown", saveShortcut);
+    return () => window.removeEventListener("keydown", saveShortcut);
+  }, [saveNow]);
+
+  const locateSourceInPdf = async () => {
+    if (!project || !mainFile || !activePath) return;
+    if (!(await saveNow())) return;
+    const target = selection ?? {
+      path: activePath,
+      startLine: 1,
+      endLine: 1,
+      startColumn: 1,
+      endColumn: 1,
+      text: "",
+      origin: "source" as const,
+    };
+    try {
+      const result = await api<Record<string, unknown>>("/api/synctex/forward", {
+        method: "POST",
+        body: JSON.stringify({
+          researchRoot: project.researchRoot,
+          paperRoot: project.paperRoot,
+          mainFile,
+          path: target.path,
+          line: target.startLine,
+          column: target.startColumn,
+        }),
+      });
+      const candidates = (result.matches as Array<Record<string, unknown>> | undefined) ?? [];
+      const match = (result.match as Record<string, unknown> | undefined)
+        ?? (result.result as Record<string, unknown> | undefined)
+        ?? candidates[0]
+        ?? result;
+      const page = Number(match.page ?? match.Page);
+      const height = Number(match.height ?? match.H ?? 14);
+      const x = Number(match.h ?? match.x ?? 0);
+      const y = Math.max(0, Number(match.v ?? match.y ?? 0) - height);
+      if (!Number.isFinite(page) || page < 1) throw new Error("No PDF location was found for this source range.");
+      setPdfFocus({
+        page,
+        x,
+        y,
+        width: Number(match.width ?? match.W ?? 90),
+        height,
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not map this source range to the PDF");
+    }
+  };
+
+  const handlePdfSelection = async (pdfSelection: PdfSelection) => {
+    if (!project || !mainFile) return;
+    setError(null);
+    try {
+      const mappings = await Promise.all(
+        pdfSelection.points.slice(0, 8).map((point) =>
+          api<Record<string, unknown>>("/api/synctex/inverse", {
+            method: "POST",
+            body: JSON.stringify({
+              researchRoot: project.researchRoot,
+              paperRoot: project.paperRoot,
+              mainFile,
+              page: pdfSelection.page,
+              x: point.x,
+              y: point.y,
+            }),
+          }).catch(() => null),
+        ),
+      );
+      const normalized = mappings
+        .filter(Boolean)
+        .map((mapping) => {
+          const result = ((mapping?.match as Record<string, unknown> | undefined)
+            ?? (mapping?.result as Record<string, unknown> | undefined)
+            ?? mapping) as Record<string, unknown>;
+          return {
+            path: relativeTo(project.researchRoot, String(result.path ?? result.input ?? result.Input ?? "")),
+            line: Number(result.line ?? result.Line),
+            column: Math.max(1, Number(result.column ?? result.Column ?? 1)),
+          };
+        })
+        .filter((mapping) => mapping.path && Number.isFinite(mapping.line) && mapping.line > 0);
+      if (!normalized.length) throw new Error("This PDF selection could not be mapped back to LaTeX source.");
+      const primaryPath = normalized[0].path;
+      const sameFile = normalized.filter((mapping) => mapping.path === primaryPath);
+      const startLine = Math.min(...sameFile.map((mapping) => mapping.line));
+      const endLine = Math.max(...sameFile.map((mapping) => mapping.line));
+      const nextContent = await openFileAfterSave(primaryPath, project);
+      if (nextContent === null) return;
+      const snippet = sourceSlice(nextContent, startLine, endLine);
+      focusSourceLine(startLine);
+      setSelection({
+        path: primaryPath,
+        startLine,
+        endLine,
+        startColumn: sameFile[0].column,
+        endColumn: sameFile.at(-1)?.column ?? 1,
+        text: snippet,
+        renderedText: pdfSelection.text,
+        origin: "pdf",
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not map the PDF selection");
+    }
+  };
+
+  const sendToCodex = async (suggestion?: string) => {
+    const message = (suggestion ?? prompt).trim();
+    if (!message || !project || !mainFile || agentBusy || pendingApproval) return;
+    if (!(await saveNow())) return;
+    setPrompt("");
+    setError(null);
+    setAgentBusy(true);
+    setAgentStatus("Starting Codex…");
+    setLatestDiff("");
+    const storedThread = localStorage.getItem(threadKey(project.researchRoot));
+    const startedAt = beginMonitoredTurn(storedThread);
+    const userId = crypto.randomUUID();
+    const assistantId = crypto.randomUUID();
+    setMessages((current) => [
+      ...current,
+      { id: userId, role: "user", text: message },
+      { id: assistantId, role: "assistant", text: "" },
+    ]);
+
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+    try {
+      const response = await fetch(`${LOCAL_API}/api/agent/turn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          researchRoot: project.researchRoot,
+          paperRoot: project.paperRoot,
+          mainFile,
+          activePath,
+          threadId: storedThread,
+          reasoningEffort,
+          prompt: message,
+          selection,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const body = await response.text();
+        throw new Error(body || `Codex request failed (${response.status})`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let approvalPresented: "file" | "permission" | null = null;
+      let activePresentedApproval: { id: string; approvalType: "file" | "permission" } | null = null;
+      let applyLifecycleHandled = false;
+      const consume = (event: StreamEvent) => {
+        if (event.threadId) localStorage.setItem(threadKey(project.researchRoot), event.threadId);
+        if (event.type !== "completed") {
+          const currentTurn = turnMonitorRef.current;
+          const activityAt = Date.now();
+          setMonitoredTurn({
+            threadId: event.threadId ?? currentTurn?.threadId ?? storedThread,
+            turnId: event.turnId ?? currentTurn?.turnId ?? null,
+            status: event.label ?? currentTurn?.status ?? "Codex is working…",
+            startedAt: currentTurn?.startedAt ?? startedAt,
+            lastActivityAt: activityAt,
+          });
+        }
+        if (event.type === "delta" && event.text) {
+          setMessages((current) => current.map((item) =>
+            item.id === assistantId ? { ...item, text: item.text + event.text } : item,
+          ));
+        } else if (event.type === "status" && event.label) {
+          setAgentStatus(event.label);
+        } else if (event.type === "diff" && event.diff !== undefined) {
+          setLatestDiff(event.diff);
+        } else if (event.type === "approval" && event.requestId !== undefined) {
+          const approvalType = event.approvalType ?? "file";
+          const files = event.files ?? [];
+          approvalPresented = approvalType;
+          activePresentedApproval = { id: String(event.requestId), approvalType };
+          setApplyConfirmationDelayed(false);
+          setApplyConfirmationMessage(null);
+          setPendingApproval({
+            id: event.requestId,
+            approvalType,
+            itemId: event.itemId,
+            reason: event.reason,
+            diff: event.diff || latestDiff || "",
+            files,
+            writePaths: event.writePaths ?? [],
+            writeTargets: event.writeTargets ?? [],
+          });
+          if (approvalType === "file" && files[0]) {
+            reviewReturnContextRef.current = {
+              path: activePath,
+              selection,
+              focusLine: sourceFocusRequest?.line ?? null,
+            };
+            replaceActivePath(files[0].path);
+            replaceContent(files[0].before);
+            replaceSavedContent(files[0].before);
+            fileHashRef.current = null;
+            setSelection(null);
+            setSourceFocusRequest(null);
+          }
+          setAgentStatus(approvalType === "permission"
+            ? "Waiting for research access approval"
+            : "Waiting for your review");
+        } else if (event.type === "approvalResolved" && event.requestId !== undefined) {
+          const resolvedRequestId = String(event.requestId);
+          if (activePresentedApproval?.id === resolvedRequestId) {
+            const resolvedApproval = activePresentedApproval;
+            activePresentedApproval = null;
+            if (resolvedApproval.approvalType === "permission") {
+              setPendingApproval((current) => (
+                current && String(current.id) === resolvedRequestId ? null : current
+              ));
+              setAgentStatus("Research access request closed; Codex is continuing…");
+            } else {
+              const returnContext = reviewReturnContextRef.current;
+              void restoreReviewContext(project, returnContext).catch((reason) => {
+                setError(reason instanceof Error ? reason.message : "Could not restore the source after review closed");
+              });
+              setAgentStatus("Review request closed; Codex is continuing…");
+            }
+          }
+        } else if (event.type === "applyCompleted") {
+          const activeApply = activeApplyRef.current;
+          const snapshotId = event.snapshotId ?? activeApply?.snapshotId ?? null;
+          if (activeApply && snapshotId) {
+            if (!activeApply.snapshotId) activeApply.snapshotId = snapshotId;
+            applyLifecycleHandled = settleActiveApply({
+              snapshotId,
+              status: event.status ?? "completed",
+              applied: event.applied ?? false,
+              undoAvailable: event.undoAvailable ?? false,
+              message: event.message,
+            }) || applyLifecycleHandled;
+          }
+        } else if (event.type === "error") {
+          setError(event.message || "Codex encountered an error");
+        } else if (event.type === "completed") {
+          setMonitoredTurn(null);
+          const activeApply = activeApplyRef.current;
+          if (activeApply) {
+            applyLifecycleHandled = true;
+            markApplyConfirmationDelayed(
+              activeApply.snapshotId
+                ? "The Codex turn completed. Verifying the approved file state before unlocking the source."
+                : "The Codex turn completed without an apply receipt. Keep this review open until local status is confirmed.",
+            );
+            if (activeApply.snapshotId) void checkApplyStatusRef.current(false);
+          } else {
+            setAgentStatus("Ready");
+            if (event.undoAvailable) setCanUndo(true);
+          }
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try { consume(JSON.parse(line) as StreamEvent); } catch { /* ignore malformed progress */ }
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) consume(JSON.parse(buffer) as StreamEvent);
+      const recoveringTurn = turnMonitorRef.current !== null;
+      setMessages((current) => current.map((item) =>
+        item.id === assistantId && !item.text
+          ? {
+            ...item,
+            text: approvalPresented === "permission"
+              ? "I requested turn-only access to write research-support outputs."
+              : approvalPresented === "file"
+                ? "I prepared source changes for your review."
+              : recoveringTurn
+                ? "The live connection ended; I’m recovering this turn."
+                : "Done.",
+          }
+          : item,
+      ));
+      if (activeApplyRef.current && !applyLifecycleHandled) {
+        markApplyConfirmationDelayed(
+          "The Codex stream ended before apply confirmation arrived. Status checks can still confirm the local change.",
+        );
+      } else if (!applyLifecycleHandled && activePath) {
+        await openFileAfterSave(activePath, project);
+      }
+    } catch (reason) {
+      if (activeApplyRef.current) {
+        markApplyConfirmationDelayed(
+          "The Codex stream was interrupted before apply confirmation arrived. Check status before editing the reviewed source.",
+        );
+      }
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) {
+        setError(reason instanceof Error ? reason.message : "Codex request failed");
+      }
+    } finally {
+      streamAbortRef.current = null;
+      setAgentBusy(turnMonitorRef.current !== null);
+    }
+  };
+
+  const decideApproval = async (decision: "accept" | "decline" | "cancel") => {
+    if (!pendingApproval || !project) return;
+    const approval = pendingApproval;
+    const permissionApproval = approval.approvalType === "permission";
+    const returnContext = reviewReturnContextRef.current;
+    let activeApply: ActiveApply | null = null;
+    if (decision === "accept" && !permissionApproval) {
+      const reviewFileForLock = activeReviewFile ?? approval.files?.[0];
+      if (reviewFileForLock) showReviewFile(reviewFileForLock);
+      activeApply = {
+        requestId: approval.id,
+        snapshotId: null,
+        approval,
+        project,
+        mainFile,
+        returnContext,
+        deadline: Date.now() + APPLY_RECOVERY_TIMEOUT_MS,
+        settled: false,
+      };
+      activeApplyRef.current = activeApply;
+      setApprovalApplying(true);
+      setApplyConfirmationDelayed(false);
+      setApplyConfirmationMessage(null);
+      setAgentStatus("Approving change…");
+    } else if (permissionApproval) {
+      setAgentStatus(decision === "accept"
+        ? "Allowing research access for this turn…"
+        : "Declining research access…");
+    }
+    setApprovalBusy(true);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), APPROVAL_REQUEST_TIMEOUT_MS);
+    try {
+      const result = await api<{
+        ok: boolean;
+        approvalType?: "file" | "permission";
+        decision: string;
+        snapshotId?: string | null;
+      }>("/api/agent/approval", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          requestId: approval.id,
+          decision,
+          researchRoot: project.researchRoot,
+          paperRoot: project.paperRoot,
+        }),
+      });
+      if (permissionApproval) {
+        const continuingStatus = decision === "accept"
+          ? "Research access allowed; Codex is continuing…"
+          : "Research access declined; Codex is continuing…";
+        setPendingApproval(null);
+        setAgentStatus(continuingStatus);
+        const monitored = turnMonitorRef.current;
+        if (monitored) {
+          setMonitoredTurn({
+            ...monitored,
+            status: continuingStatus,
+            lastActivityAt: Date.now(),
+          });
+        }
+      } else if (decision === "accept") {
+        if (!activeApply || activeApplyRef.current !== activeApply || activeApply.settled) return;
+        activeApply.snapshotId = result.snapshotId ?? null;
+        setAgentStatus("Applying approved change…");
+        if (activeApply.snapshotId) {
+          startApplyPolling(activeApply);
+        } else {
+          markApplyConfirmationDelayed(
+            "The local companion did not return an apply receipt. Keep this review open until the Codex stream confirms the change.",
+          );
+        }
+      } else {
+        setAgentStatus("Change declined");
+        await restoreReviewContext(project, returnContext);
+      }
+    } catch (reason) {
+      const approvalTimedOut = decision === "accept"
+        && reason instanceof DOMException
+        && reason.name === "AbortError";
+      if (permissionApproval) {
+        setAgentStatus(approvalTimedOut
+          ? "Checking research access status…"
+          : "Waiting for research access approval");
+        if (approvalTimedOut) void pollAgentStatus(project);
+      } else if (decision === "accept") {
+        if (approvalTimedOut && activeApplyRef.current === activeApply && activeApply && !activeApply.settled) {
+          markApplyConfirmationDelayed(
+            "Approval confirmation timed out. Keep this review open while Codex finishes, then check the local change status.",
+          );
+        } else if (activeApplyRef.current === activeApply && activeApply) {
+          activeApply.settled = true;
+          activeApplyRef.current = null;
+          clearApplyPolling();
+          setApprovalApplying(false);
+          setApplyConfirmationDelayed(false);
+          setApplyConfirmationMessage(null);
+          setAgentStatus("Waiting for your review");
+        }
+      }
+      if (!approvalTimedOut) {
+        setError(reason instanceof Error ? reason.message : "Could not send your decision");
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      setApprovalBusy(false);
+    }
+  };
+
+  const stopCodexTurn = async () => {
+    if (
+      !project
+      || stoppingTurn
+      || approvalBusy
+      || approvalApplying
+      || applyConfirmationDelayed
+      || refreshingAfterApply
+      || activeApplyRef.current
+      || !turnMonitorRef.current?.turnId
+    ) return;
+    const monitored = turnMonitorRef.current;
+    const stoppingPermissionApproval = pendingApproval?.approvalType === "permission";
+    const storedThread = localStorage.getItem(threadKey(project.researchRoot));
+    setStoppingTurn(true);
+    setAgentStatus("Stopping Codex…");
+    try {
+      const result = await api<StopTurnResponse>("/api/agent/stop", {
+        method: "POST",
+        body: JSON.stringify({
+          researchRoot: project.researchRoot,
+          paperRoot: project.paperRoot,
+          threadId: monitored.threadId ?? storedThread,
+          turnId: monitored.turnId,
+        }),
+      });
+      streamAbortRef.current?.abort();
+      if (result.approvalDeclined && !activeApplyRef.current) {
+        if (stoppingPermissionApproval) {
+          setPendingApproval(null);
+        } else {
+          await restoreReviewContext(project, reviewReturnContextRef.current);
+        }
+      }
+      if (result.status === "idle") {
+        setMonitoredTurn(null);
+        setAgentBusy(false);
+        setAgentStatus("Ready");
+      } else {
+        setMonitoredTurn({
+          ...monitored,
+          status: "Stopping Codex…",
+          lastActivityAt: Date.now(),
+        });
+      }
+      void pollAgentStatus(project);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not stop the Codex turn");
+      setAgentStatus(monitored.status || "Codex is working…");
+    } finally {
+      setStoppingTurn(false);
+    }
+  };
+
+  const undoLastChange = async () => {
+    if (!project || !canUndo) return;
+    if (!(await saveNow())) return;
+    try {
+      await api("/api/changes/undo", {
+        method: "POST",
+        body: JSON.stringify({ researchRoot: project.researchRoot, paperRoot: project.paperRoot }),
+      });
+      setCanUndo(false);
+      await openProject(project.researchRoot, project.paperRoot, mainFile ?? undefined);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not undo the last accepted change");
+    }
+  };
+
+  const explorerMaximum = workspaceWidth
+    ? Math.max(
+        EXPLORER_MIN,
+        Math.min(
+          EXPLORER_MAX,
+          workspaceWidth - fittedPanes.agentWidth - DOCUMENT_MIN - PANE_HANDLE_SIZE * 2,
+        ),
+      )
+    : EXPLORER_MAX;
+  const agentMaximum = workspaceWidth
+    ? Math.max(
+        AGENT_MIN,
+        Math.min(
+          AGENT_MAX,
+          workspaceWidth
+            - (explorerOpen ? fittedPanes.explorerWidth + PANE_HANDLE_SIZE * 2 : PANE_HANDLE_SIZE)
+            - DOCUMENT_MIN,
+        ),
+      )
+    : AGENT_MAX;
+
+  const startExplorerResize = () => {
+    explorerDragStartRef.current = fittedPanes.explorerWidth;
+    setActiveResize("columns");
+  };
+  const resizeExplorer = (delta: number) => {
+    const explorerWidth = clamp(explorerDragStartRef.current + delta, EXPLORER_MIN, explorerMaximum);
+    setPaneLayout((current) => ({ ...current, explorerWidth }));
+  };
+  const nudgeExplorer = (delta: number) => {
+    const explorerWidth = clamp(fittedPanes.explorerWidth + delta, EXPLORER_MIN, explorerMaximum);
+    setPaneLayout((current) => ({ ...current, explorerWidth }));
+  };
+
+  const startAgentResize = () => {
+    agentDragStartRef.current = fittedPanes.agentWidth;
+    setActiveResize("columns");
+  };
+  const resizeAgent = (delta: number) => {
+    const agentWidth = clamp(agentDragStartRef.current - delta, AGENT_MIN, agentMaximum);
+    setPaneLayout((current) => ({ ...current, agentWidth }));
+  };
+  const nudgeAgent = (delta: number) => {
+    const agentWidth = clamp(fittedPanes.agentWidth - delta, AGENT_MIN, agentMaximum);
+    setPaneLayout((current) => ({ ...current, agentWidth }));
+  };
+
+  const startSourceResize = () => {
+    sourceDragStartRef.current = {
+      ratio: effectiveSourceRatio,
+      extent: Math.max(1, splitExtent),
+      min: ratioBounds.min,
+      max: ratioBounds.max,
+    };
+    setActiveResize(sourceStacked ? "rows" : "columns");
+  };
+  const resizeSource = (delta: number) => {
+    const start = sourceDragStartRef.current;
+    const sourceRatio = clamp(start.ratio + delta / start.extent, start.min, start.max);
+    setPaneLayout((current) => ({ ...current, sourceRatio }));
+  };
+  const nudgeSource = (delta: number) => {
+    const sourceRatio = clamp(
+      effectiveSourceRatio + delta / Math.max(1, splitExtent),
+      ratioBounds.min,
+      ratioBounds.max,
+    );
+    setPaneLayout((current) => ({ ...current, sourceRatio }));
+  };
+
+  const paneStyles = {
+    "--explorer-width": `${fittedPanes.explorerWidth}px`,
+    "--agent-width": `${fittedPanes.agentWidth}px`,
+    "--source-share": `${effectiveSourceRatio * 100}%`,
+  } as CSSProperties;
+
+  const selectedLabel = selection
+    ? `${nameOf(selection.path)} · L${selection.startLine}${selection.endLine !== selection.startLine ? `–${selection.endLine}` : ""}`
+    : null;
+
+  const mainOptions = project
+    ? paperMainCandidates(project).map((candidate) => relativeTo(project.researchRoot, candidate.path))
+    : [];
+
+  const savePresentation = (() => {
+    if (!activePath) return null;
+    if (activeReviewFile && approvalApplying) {
+      return { kind: "saving", label: "Saving approved change to disk…", detail: null };
+    }
+    if (activeReviewFile && applyConfirmationDelayed) {
+      return { kind: "pending", label: "Write awaiting confirmation", detail: null };
+    }
+    if (activeReviewFile) {
+      return { kind: "proposal", label: "Proposal only", detail: "not written yet" };
+    }
+    if (refreshingAfterApply) {
+      return { kind: "saving", label: "Refreshing saved files…", detail: null };
+    }
+    if (activeReadOnly) return { kind: "readonly", label: "Read only", detail: null };
+    if (saving) return { kind: "saving", label: "Saving to disk…", detail: null };
+    if (dirty) return { kind: "unsaved", label: "Unsaved changes", detail: null };
+    if (lastSuccessfulSaveAt) {
+      return {
+        kind: "saved",
+        label: "Saved to disk",
+        detail: formatSaveTime(lastSuccessfulSaveAt),
+      };
+    }
+    return { kind: "on-disk", label: "On disk", detail: null };
+  })();
+
+  return (
+    <main
+      className={`lattice-app ${explorerOpen ? "" : "explorer-collapsed"} ${activeResize ? `resizing-${activeResize}` : ""}`}
+      style={paneStyles}
+    >
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark"><span /></span>
+          <div><strong>Local LaTeX Workbench</strong><small>local paper studio</small></div>
+        </div>
+
+        <button className="workspace-picker" onClick={chooseWorkspace} disabled={agentBusy || Boolean(pendingApproval)}>
+          <FolderOpen size={15} />
+          <span>
+            <small>Research workspace</small>
+            <strong>{project ? nameOf(project.researchRoot) : "Choose a folder"}</strong>
+          </span>
+          <ChevronDown size={14} />
+        </button>
+
+        <div className="topbar-spacer" />
+
+        {project ? (
+          <label className="main-file-picker">
+            <span>Main</span>
+            <select
+              value={mainFile ?? ""}
+              disabled={agentBusy || Boolean(pendingApproval)}
+              onChange={async (event) => {
+                const value = event.target.value;
+                if (!(await saveNow())) return;
+                setMainFile(value);
+                localStorage.setItem(LAST_PROJECT_KEY, JSON.stringify({
+                  researchRoot: project.researchRoot,
+                  paperRoot: project.paperRoot,
+                  mainFile: value,
+                }));
+                await openFile(value, project);
+                await compile({ mainFile: value });
+              }}
+            >
+              {mainOptions.map((path) => <option key={path}>{path}</option>)}
+            </select>
+          </label>
+        ) : null}
+
+        {project ? (
+          <label
+            className="reasoning-picker"
+            title={codexSettings?.displayName
+              ? `Reasoning effort for ${codexSettings.displayName}`
+              : "Codex reasoning effort"}
+          >
+            <Sparkles size={13} />
+            <span>Intelligence</span>
+            <select
+              value={reasoningEffort}
+              onChange={(event) => {
+                const value = event.target.value;
+                setReasoningEffort(value);
+                if (value) localStorage.setItem(effortKey(project.researchRoot), value);
+                else localStorage.removeItem(effortKey(project.researchRoot));
+              }}
+              aria-label="Codex intelligence level"
+            >
+              <option value="">
+                {codexSettings?.defaultReasoningEffort
+                  ? `Default · ${effortLabel(codexSettings.defaultReasoningEffort)}`
+                  : "Default"}
+              </option>
+              {codexSettings?.supportedReasoningEfforts.map((option) => (
+                <option key={option.reasoningEffort} value={option.reasoningEffort}>
+                  {effortLabel(option.reasoningEffort)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
+        <span className={`connection-pill ${health?.codex?.authenticated ? "connected" : ""}`}>
+          <span /> {health === null ? "Connecting" : health?.codex?.authenticated ? "Codex subscription" : "Codex offline"}
+        </span>
+
+        <button className="button compile-button" onClick={() => compile()} disabled={!mainFile || compiling}>
+          {compiling ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
+          {compiling ? "Compiling" : "Compile"}
+        </button>
+      </header>
+
+      {error ? (
+        <div className="error-banner" role="alert">
+          <CircleAlert size={15} /> <span>{error}</span>
+          <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
+        </div>
+      ) : null}
+
+      <div ref={workspaceGridRef} className="workspace-grid">
+        <aside id="paper-files-pane" className="explorer-panel">
+          <div className="panel-title explorer-title">
+            <div><span className="eyebrow">Project</span><strong>Paper files</strong></div>
+            <button onClick={() => setExplorerOpen(false)} aria-label="Close file explorer"><PanelLeftClose size={16} /></button>
+          </div>
+          {project ? (
+            <button className="paper-root-card" onClick={choosePaperFolder} disabled={agentBusy || Boolean(pendingApproval)}>
+              <span className="paper-root-icon"><FileCode2 size={15} /></span>
+              <span>
+                <small>Paper folder · local destination</small>
+                <strong title={project.paperRoot}>{project.paperRoot}</strong>
+              </span>
+              <RefreshCw size={12} />
+            </button>
+          ) : null}
+          <FileTree
+            nodes={project?.tree ?? []}
+            activePath={activePath}
+            paperRoot={project ? relativeTo(project.researchRoot, project.paperRoot) : null}
+            onOpen={(path) => {
+              if ((approvalApplying || applyConfirmationDelayed) && pendingApproval) {
+                const reviewFile = pendingApproval.files?.find((file) => file.path === path);
+                if (reviewFile) showReviewFile(reviewFile);
+                return;
+              }
+              void openFileAfterSave(path);
+            }}
+          />
+        </aside>
+
+        <ResizeHandle
+          className="explorer-resizer"
+          orientation="vertical"
+          label="Resize paper files panel"
+          controls="paper-files-pane document-pane"
+          value={fittedPanes.explorerWidth}
+          min={EXPLORER_MIN}
+          max={explorerMaximum}
+          valueText={`${Math.round(fittedPanes.explorerWidth)} pixels wide`}
+          disabled={!outerResizable || !explorerOpen}
+          onDragStart={startExplorerResize}
+          onDrag={resizeExplorer}
+          onDragEnd={() => setActiveResize(null)}
+          onNudge={nudgeExplorer}
+          onBoundary={(boundary) => {
+            const explorerWidth = boundary === "min" ? EXPLORER_MIN : explorerMaximum;
+            setPaneLayout((current) => ({ ...current, explorerWidth }));
+          }}
+          onReset={() => setPaneLayout((current) => ({
+            ...current,
+            explorerWidth: clamp(DEFAULT_PANES.explorerWidth, EXPLORER_MIN, explorerMaximum),
+          }))}
+        />
+
+        {!explorerOpen ? (
+          <button className="explorer-restore" onClick={() => setExplorerOpen(true)} aria-label="Open file explorer">
+            <PanelLeftOpen size={16} />
+          </button>
+        ) : null}
+
+        <section id="document-pane" className="document-workspace">
+          <div className="document-toolbar">
+            <div className="document-tab" title={activeSourceDiskPath ?? undefined}>
+              <FileCode2 size={14} />
+              <span>{activePath ? nameOf(activePath) : "Source"}</span>
+              {dirty ? <i title="Unsaved changes" /> : null}
+            </div>
+            {project ? (
+              <div className="active-disk-path">
+                <span className="path-prefix">Local path</span>
+                <code title={activeSourceDiskPath ?? project.paperRoot}>
+                  {activeSourceDiskPath ?? project.paperRoot}
+                </code>
+                {activeSourceDiskPath ? (
+                  <button
+                    type="button"
+                    className="path-action"
+                    onClick={() => { void copyLocalPath(activeSourceDiskPath); }}
+                    aria-label="Copy full local source path"
+                    title="Copy full local source path"
+                  >
+                    {copiedPath === activeSourceDiskPath ? <Check size={11} /> : <Copy size={11} />}
+                    <span>{copiedPath === activeSourceDiskPath ? "Copied" : "Copy path"}</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="path-action"
+                  onClick={() => { void revealLocalDestination(); }}
+                  aria-label={activePath && !activeReviewFile && !activeReadOnly
+                    ? "Show source file in Finder"
+                    : "Show paper folder in Finder"}
+                  title={activePath && !activeReviewFile && !activeReadOnly
+                    ? "Show source file in Finder"
+                    : "Show paper folder in Finder"}
+                >
+                  <FolderOpen size={11} />
+                  <span>Show in Finder</span>
+                </button>
+              </div>
+            ) : null}
+            {savePresentation ? (
+              <button
+                type="button"
+                className={`save-state save-state-${savePresentation.kind}`}
+                aria-live="polite"
+                onClick={() => { void saveNow(); }}
+                disabled={saving || activeReadOnly || Boolean(activeReviewFile)}
+                title={lastSuccessfulSaveAt && savePresentation.kind === "saved"
+                  ? `Last successful local save: ${new Date(lastSuccessfulSaveAt).toLocaleString()}`
+                  : `${savePresentation.label}${activeReadOnly || activeReviewFile ? "" : " · Save now (Cmd/Ctrl+S)"}`}
+              >
+                {savePresentation.kind === "saving" ? <LoaderCircle className="spin" size={12} />
+                  : savePresentation.kind === "unsaved" ? <Save size={12} />
+                    : savePresentation.kind === "proposal" || savePresentation.kind === "pending" ? <GitCompareArrows size={12} />
+                      : <Check size={12} />}
+                <span>{savePresentation.label}</span>
+                {savePresentation.detail ? <small>· {savePresentation.detail}</small> : null}
+              </button>
+            ) : null}
+            {canUndo ? (
+              <button className="toolbar-button" onClick={undoLastChange}><RotateCcw size={13} /> Undo AI edit</button>
+            ) : null}
+          </div>
+
+          <div ref={documentSplitRef} className="document-split">
+            <section id="source-pane" className="source-pane">
+              <div className="pane-label">
+                <span>{activeReviewFile ? "Source review" : "LaTeX source"}</span>
+                <small>{activeReviewFile ? "current / proposed" : activeReadOnly ? "research context · read only" : "paper file"}</small>
+              </div>
+              <SourceEditor
+                path={activePath}
+                content={content}
+                readOnly={activeReadOnly}
+                focusRequest={sourceFocusRequest}
+                review={activeReviewFile}
+                onChange={replaceContent}
+                onSelection={setSelection}
+                onLocatePdf={locateSourceInPdf}
+              />
+            </section>
+            <ResizeHandle
+              className="source-preview-resizer"
+              orientation={sourceStacked ? "horizontal" : "vertical"}
+              label="Resize source and rendered paper"
+              controls="source-pane preview-pane"
+              value={effectiveSourceRatio * 100}
+              min={ratioBounds.min * 100}
+              max={ratioBounds.max * 100}
+              valueText={`${Math.round(effectiveSourceRatio * 100)} percent source`}
+              onDragStart={startSourceResize}
+              onDrag={resizeSource}
+              onDragEnd={() => setActiveResize(null)}
+              onNudge={nudgeSource}
+              onBoundary={(boundary) => {
+                const sourceRatio = boundary === "min" ? ratioBounds.min : ratioBounds.max;
+                setPaneLayout((current) => ({ ...current, sourceRatio }));
+              }}
+              onReset={() => setPaneLayout((current) => ({
+                ...current,
+                sourceRatio: clamp(DEFAULT_PANES.sourceRatio, ratioBounds.min, ratioBounds.max),
+              }))}
+            />
+            <section id="preview-pane" className="preview-pane">
+              <div className="pane-label">
+                <span>Rendered paper</span>
+                <small>select text to reveal its source</small>
+              </div>
+              <PdfViewer
+                key={project && mainFile
+                  ? `${project.researchRoot}\n${project.paperRoot}\n${mainFile}`
+                  : "no-paper-preview"}
+                url={pdfUrl}
+                buildId={buildId}
+                focus={pdfFocus}
+                compiling={compiling}
+                onSelect={handlePdfSelection}
+              />
+            </section>
+          </div>
+
+          <footer className="build-status">
+            <button onClick={() => setLogOpen((value) => !value)} disabled={!compileLog}>
+              <span className={`build-dot ${compileErrors.length ? "warning" : pdfUrl ? "success" : "idle"}`} />
+              {compiling ? "Building…" : compileErrors.length ? `${compileErrors.length} LaTeX ${compileErrors.length === 1 ? "issue" : "issues"}` : pdfUrl ? "Build is current" : "No build yet"}
+              {compileLog ? <ChevronDown size={12} className={logOpen ? "rotated" : ""} /> : null}
+            </button>
+            <span>{selection ? `${selection.origin === "pdf" ? "PDF mapped to" : "Selected"} ${selectedLabel}` : "Select source or rendered text to focus Codex"}</span>
+          </footer>
+          {logOpen ? <pre className="compile-log">{compileErrors.join("\n") || compileLog}</pre> : null}
+        </section>
+
+        <ResizeHandle
+          className="agent-resizer"
+          orientation="vertical"
+          label="Resize Codex panel"
+          controls="document-pane codex-pane"
+          value={fittedPanes.agentWidth}
+          min={AGENT_MIN}
+          max={agentMaximum}
+          valueText={`${Math.round(fittedPanes.agentWidth)} pixels wide`}
+          disabled={!outerResizable}
+          onDragStart={startAgentResize}
+          onDrag={resizeAgent}
+          onDragEnd={() => setActiveResize(null)}
+          onNudge={nudgeAgent}
+          onBoundary={(boundary) => {
+            const agentWidth = boundary === "min" ? AGENT_MIN : agentMaximum;
+            setPaneLayout((current) => ({ ...current, agentWidth }));
+          }}
+          onReset={() => setPaneLayout((current) => ({
+            ...current,
+            agentWidth: clamp(DEFAULT_PANES.agentWidth, AGENT_MIN, agentMaximum),
+          }))}
+        />
+
+        <aside id="codex-pane" className="agent-panel">
+          <div className="agent-header">
+            <div className="agent-avatar"><Sparkles size={17} /></div>
+            <div><span className="eyebrow">Your local agent</span><strong>Codex</strong></div>
+            <span className={`agent-status ${agentBusy || turnActive ? "busy" : ""}`}>{agentStatus}</span>
+          </div>
+
+          {turnMonitor ? (
+            <div className={`turn-monitor${turnTakingLong ? " is-delayed" : ""}`} role="status" aria-live="polite">
+              <div className="turn-monitor-copy">
+                <span className="turn-monitor-title">
+                  <LoaderCircle className="spin" size={13} />
+                  {turnTakingLong ? "Taking longer than usual" : turnMonitor.status || "Codex is working…"}
+                </span>
+                <span className="turn-monitor-time">{formatElapsed(turnElapsed)} elapsed</span>
+              </div>
+              <button
+                type="button"
+                className="turn-stop-button"
+                onClick={() => { void stopCodexTurn(); }}
+                disabled={stoppingTurn || approvalBusy || stopLockedForApply || !turnInterruptible}
+                title={!turnInterruptible
+                  ? "Codex is still starting"
+                  : approvalBusy || stopLockedForApply
+                    ? "Wait for the approved change to finish"
+                    : "Stop this Codex turn"}
+              >
+                {stoppingTurn ? <LoaderCircle className="spin" size={12} /> : <Square size={11} fill="currentColor" />}
+                {stoppingTurn ? "Stopping…" : "Stop"}
+              </button>
+            </div>
+          ) : null}
+
+          {pendingApproval ? (
+            <DiffViewer
+              approval={pendingApproval}
+              activePath={activePath}
+              busy={approvalBusy || approvalApplying}
+              confirmationDelayed={applyConfirmationDelayed}
+              confirmationMessage={applyConfirmationMessage}
+              onAccept={() => decideApproval("accept")}
+              onReject={() => decideApproval("decline")}
+              onCheckStatus={() => { void checkApplyStatus(true); }}
+              onOpenFile={(path) => {
+                const file = pendingApproval.files?.find((candidate) => candidate.path === path);
+                if (file) showReviewFile(file);
+              }}
+            />
+          ) : (
+            <>
+              <div ref={chatScrollRef} className="chat-scroll">
+                {!messages.length ? (
+                  <div className="agent-welcome">
+                    <span className="welcome-mark"><MessageSquareText size={20} /></span>
+                    <h2>Revise in context.</h2>
+                    <p>
+                      Codex can read the paper, equations, figures, references, and the code around them.
+                      Source edits wait for your approval. To rerun code or generate non-paper outputs, Codex may ask for turn-only access to the smallest research-output folder it needs; network access stays off.
+                    </p>
+                    <div className="suggestion-list">
+                      {[
+                        "Tighten this passage without changing its claims",
+                        "Check whether this equation is explained clearly",
+                        "Make the notation consistent across the paper",
+                      ].map((suggestion) => (
+                        <button key={suggestion} onClick={() => sendToCodex(suggestion)} disabled={!project || !selection}>
+                          <Sparkles size={12} /> {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : messages.map((message) => (
+                  <article className={`chat-message ${message.role}`} key={message.id}>
+                    <span>{message.role === "assistant" ? <Bot size={13} /> : "You"}</span>
+                    <p>{message.text || (agentBusy && message.role === "assistant" ? "Thinking…" : "")}</p>
+                  </article>
+                ))}
+                {latestDiff && !pendingApproval && agentBusy ? (
+                  <div className="diff-preparing"><GitCompareArrows size={14} /> Preparing a reviewable patch…</div>
+                ) : null}
+              </div>
+
+              <div className="composer-wrap">
+                {selectedLabel ? (
+                  <div className="selection-chip">
+                    <span>{selection?.origin === "pdf" ? "PDF → LaTeX" : "Selected source"}</span>
+                    <strong>{selectedLabel}</strong>
+                    <button onClick={() => setSelection(null)} aria-label="Clear selection"><X size={12} /></button>
+                  </div>
+                ) : null}
+                <div className="composer">
+                  <textarea
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        sendToCodex();
+                      }
+                    }}
+                    placeholder={project ? "Ask Codex to revise, check, or explain…" : "Open a paper to begin…"}
+                    disabled={!project || agentBusy}
+                    rows={3}
+                  />
+                  <button
+                    className="send-button"
+                    onClick={() => sendToCodex()}
+                    disabled={!prompt.trim() || !project || agentBusy}
+                    aria-label="Send to Codex"
+                  >
+                    {agentBusy ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={16} />}
+                  </button>
+                </div>
+                <p className="composer-note">
+                  {selection
+                    ? "Selection is the primary target · related paper edits are allowed when needed"
+                    : "Uses your Codex subscription · no API key"}
+                </p>
+              </div>
+            </>
+          )}
+        </aside>
+      </div>
+
+      {!project ? (
+        <div className="onboarding-overlay">
+          <section className="onboarding-card">
+            <span className="onboarding-kicker">Local-first scientific writing</span>
+            <h1>Your paper, its source, and Codex—in one view.</h1>
+            <p>Choose the research folder that holds your code and data, then the paper folder inside it. The workbench keeps both in context while edits remain yours to approve.</p>
+            <button className="button primary onboarding-button" onClick={chooseWorkspace}>
+              <FolderOpen size={16} /> Choose research workspace
+            </button>
+            <div className="onboarding-points">
+              <span><Check size={13} /> Existing Codex sign-in</span>
+              <span><Check size={13} /> Local LaTeX toolchain</span>
+              <span><Check size={13} /> Diff, approve, undo</span>
+            </div>
+            {health && !health.ok ? <small className="companion-warning">Start the local companion to enable folders, LaTeX, and Codex.</small> : null}
+          </section>
+        </div>
+      ) : null}
+    </main>
+  );
+}
