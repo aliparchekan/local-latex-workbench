@@ -8,6 +8,16 @@ import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import { applyPatch, createTwoFilesPatch } from "diff";
+import {
+  AGENT_PROVIDERS,
+  EXTERNAL_PROVIDER_IDS,
+  normalizeProvider,
+  parseProviderResult,
+  providerEnvironment,
+  providerInvocation,
+  providerName,
+  providerThreadId,
+} from "./providers.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = 4317;
@@ -18,6 +28,7 @@ const MAX_TREE_DEPTH = 14;
 const CODEX_REQUEST_TIMEOUT_MS = 30_000;
 const APPROVAL_TIMEOUT_MS = 15 * 60_000;
 const TURN_TIMEOUT_MS = 45 * 60_000;
+const PROVIDER_OUTPUT_BYTES = 24 * 1024 * 1024;
 const MAX_REVIEW_FILES = 128;
 const MAX_REVIEW_BYTES = 16 * 1024 * 1024;
 const MAX_PERMISSION_SCAN_ENTRIES = 2_000;
@@ -323,30 +334,94 @@ function runProcess(command, args, options = {}) {
 let healthCache = null;
 async function getHealth() {
   if (healthCache && Date.now() - healthCache.at < 5_000) return healthCache.value;
-  const [version, login, latexmk, synctex] = await Promise.all([
+  const [version, login, claudeVersionResult, claudeLogin, cursorVersionResult, cursorLogin, latexmk, synctex] = await Promise.all([
     runProcess("codex", ["--version"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
     runProcess("codex", ["login", "status"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
+    runProcess("claude", ["--version"], {
+      env: providerEnvironment("claude"),
+      timeoutMs: 8_000,
+      maxOutputBytes: 16_384,
+    }),
+    runProcess("claude", ["auth", "status"], {
+      env: providerEnvironment("claude"),
+      timeoutMs: 8_000,
+      maxOutputBytes: 16_384,
+    }),
+    runProcess("agent", ["--version"], {
+      env: providerEnvironment("cursor"),
+      timeoutMs: 8_000,
+      maxOutputBytes: 16_384,
+    }),
+    runProcess("agent", ["status"], {
+      env: providerEnvironment("cursor"),
+      timeoutMs: 8_000,
+      maxOutputBytes: 16_384,
+    }),
     runProcess("latexmk", ["-v"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
     runProcess("synctex", ["help"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
   ]);
 
   const codexInstalled = version.code === 0;
-  const authenticated = login.code === 0 && /logged in using chatgpt/i.test(`${login.stdout}\n${login.stderr}`);
+  const codexAuthenticated = login.code === 0 && /logged in using chatgpt/i.test(`${login.stdout}\n${login.stderr}`);
   const codexVersion = `${version.stdout}\n${version.stderr}`.match(/codex-cli\s+([^\s]+)/i)?.[1] ?? null;
+  const claudeInstalled = claudeVersionResult.code === 0;
+  let claudeAuthenticated = false;
+  try {
+    const status = JSON.parse(claudeLogin.stdout.trim());
+    claudeAuthenticated = claudeLogin.code === 0 && status.loggedIn === true && status.authMethod !== "api_key";
+  } catch {
+    claudeAuthenticated = claudeLogin.code === 0
+      && /logged\s*in|authenticated/i.test(`${claudeLogin.stdout}\n${claudeLogin.stderr}`)
+      && !/not\s+(?:logged\s*in|authenticated)/i.test(`${claudeLogin.stdout}\n${claudeLogin.stderr}`);
+  }
+  const claudeVersion = `${claudeVersionResult.stdout}\n${claudeVersionResult.stderr}`.match(/(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/)?.[1] ?? null;
+  const cursorInstalled = cursorVersionResult.code === 0;
+  const cursorStatusText = `${cursorLogin.stdout}\n${cursorLogin.stderr}`;
+  const cursorAuthenticated = cursorLogin.code === 0
+    && !/not\s+(?:logged\s*in|authenticated)|login required/i.test(cursorStatusText);
+  const cursorVersion = `${cursorVersionResult.stdout}\n${cursorVersionResult.stderr}`.match(/(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/)?.[1] ?? null;
   const latexVersion = `${latexmk.stdout}\n${latexmk.stderr}`.match(/Version\s+([^\s]+)/i)?.[1] ?? null;
-  const value = {
-    ok: codexInstalled && authenticated && latexmk.code === 0 && synctex.code === 0,
-    platform: { os: process.platform, arch: process.arch },
+  const providers = {
     codex: {
       installed: codexInstalled,
-      authenticated,
+      authenticated: codexAuthenticated,
       label: !codexInstalled
         ? "Codex CLI not found"
-        : authenticated
+        : codexAuthenticated
           ? `Codex ${codexVersion ?? "CLI"} · ChatGPT subscription`
           : "Codex CLI found · ChatGPT sign-in required",
       version: codexVersion,
     },
+    claude: {
+      installed: claudeInstalled,
+      authenticated: claudeAuthenticated,
+      label: !claudeInstalled
+        ? "Claude Code not found"
+        : claudeAuthenticated
+          ? `Claude Code ${claudeVersion ?? "CLI"} · Claude subscription`
+          : "Claude Code found · run claude auth login",
+      version: claudeVersion,
+    },
+    cursor: {
+      installed: cursorInstalled,
+      authenticated: cursorAuthenticated,
+      label: !cursorInstalled
+        ? "Cursor Agent CLI not found"
+        : cursorAuthenticated
+          ? `Cursor Agent ${cursorVersion ?? "CLI"} · Cursor subscription`
+          : "Cursor Agent found · run agent login",
+      version: cursorVersion,
+    },
+  };
+  const value = {
+    ok: Object.values(providers).some((provider) => provider.authenticated)
+      && latexmk.code === 0
+      && synctex.code === 0,
+    platform: { os: process.platform, arch: process.arch },
+    providers,
+    codex: providers.codex,
+    claude: providers.claude,
+    cursor: providers.cursor,
     latex: {
       installed: latexmk.code === 0,
       label: latexmk.code === 0 ? `latexmk ${latexVersion ?? "available"}` : "latexmk not found",
@@ -856,6 +931,9 @@ const turnFinalizations = new Map();
 const activeTurns = new Map();
 const completedTurns = new Map();
 const terminalTurns = new Map();
+const externalProcesses = new Map();
+const externalApprovalWaiters = new Map();
+const externalCancelledTurns = new Set();
 
 const turnKey = (threadId, turnId) => `${threadId}:${turnId}`;
 const itemKey = (threadId, turnId, itemId) => `${threadId}:${turnId}:${itemId}`;
@@ -869,6 +947,7 @@ function publicActiveTurn(turn) {
     label: turn.label,
     startedAt: turn.startedAt,
     lastActivityAt: turn.lastActivityAt,
+    provider: turn.provider ?? "codex",
   };
 }
 
@@ -880,16 +959,18 @@ function registerActiveTurn(session, turn) {
     || completedTurns.has(turnKey(session.threadId, turnId))
   ) return null;
   const now = Date.now();
+  const provider = session.provider ?? "codex";
   const active = {
     threadId: session.threadId,
     turnId,
     researchRoot: session.researchRoot,
     paperRoot: session.paperRoot,
     status: turn.status ?? "inProgress",
-    label: "Codex is working…",
+    label: `${providerName(provider)} is working…`,
     startedAt: now,
     lastActivityAt: now,
     generation: session.generation,
+    provider,
   };
   activeTurns.set(session.threadId, active);
   return active;
@@ -991,6 +1072,7 @@ function publicSnapshotStatus(snapshot) {
 }
 
 async function finalizeUndoSnapshot(snapshot, applyStatus) {
+  const agentName = providerName(snapshot.provider ?? "codex");
   if (applyStatus !== "completed") {
     snapshot.applied = false;
     snapshot.applyStatus = applyStatus;
@@ -1015,7 +1097,7 @@ async function finalizeUndoSnapshot(snapshot, applyStatus) {
         snapshot.applyError = `Applied bytes did not match the approved proposal for: ${mismatches.join(", ")}`;
         broadcastAgent(snapshot.threadId, snapshot.turnId, {
           type: "error",
-          message: "Codex finished writing, but one or more files did not match the approved preview. Undo is available while those files remain unchanged.",
+          message: `${agentName} finished writing, but one or more files did not match the approved preview. Undo is available while those files remain unchanged.`,
         });
       } else {
         snapshot.applyStatus = "completed";
@@ -1258,6 +1340,27 @@ async function codexSettingsForProject(researchRoot) {
   return settings;
 }
 
+async function agentSettingsForProject(provider, researchRoot) {
+  if (provider === "codex") return codexSettingsForProject(researchRoot);
+  if (provider === "claude") {
+    return {
+      model: null,
+      displayName: "Claude Code subscription model",
+      defaultReasoningEffort: null,
+      supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({
+        reasoningEffort,
+        description: `${reasoningEffort} Claude Code effort`,
+      })),
+    };
+  }
+  return {
+    model: null,
+    displayName: "Cursor subscription model",
+    defaultReasoningEffort: null,
+    supportedReasoningEfforts: [],
+  };
+}
+
 async function validateReasoningEffort(modelName, effort) {
   const models = await getCodexModelCatalog();
   const model = models.find((entry) => entry.model === modelName || entry.id === modelName);
@@ -1378,6 +1481,7 @@ async function pathsForFileApproval(session, params) {
 }
 
 async function materializeReviewFiles(session, changes) {
+  const agentName = providerName(session.provider ?? "codex");
   if (!Array.isArray(changes) || changes.length === 0) {
     throw new HttpError(403, "The requested file changes could not be materialized.");
   }
@@ -1429,14 +1533,14 @@ async function materializeReviewFiles(session, changes) {
     if (!change?.path) continue;
     const kind = change.kind?.type ?? "update";
     if (!["add", "update", "delete"].includes(kind)) {
-      throw new HttpError(400, "Codex proposed an unsupported file-change kind.");
+      throw new HttpError(400, `${agentName} proposed an unsupported file-change kind.`);
     }
     const resolved = await safeApprovalPath(session.researchRoot, change.path, { mustExist: false });
     if (kind === "add" && resolved.exists) {
       throw new HttpError(409, `${relativePortable(session.researchRoot, resolved.path)} already exists but the proposal treats it as a new file.`);
     }
     if (kind !== "add" && !resolved.exists) {
-      throw new HttpError(409, `${relativePortable(session.researchRoot, resolved.path)} no longer exists. Ask Codex to prepare a fresh change.`);
+      throw new HttpError(409, `${relativePortable(session.researchRoot, resolved.path)} no longer exists. Ask ${agentName} to prepare a fresh change.`);
     }
 
     claimTarget(resolved.path, "source");
@@ -1452,7 +1556,7 @@ async function materializeReviewFiles(session, changes) {
 
     const originalDiff = change.diff ?? "";
     if (typeof originalDiff !== "string") {
-      throw new HttpError(400, "Codex returned an invalid file patch.");
+      throw new HttpError(400, `${agentName} returned an invalid file patch.`);
     }
     accountBytes(beforeBuffer.length + Buffer.byteLength(originalDiff, "utf8"));
 
@@ -1542,11 +1646,14 @@ function publicReviewFiles(files) {
 
 function publicPendingApproval(pending) {
   if (!pending) return null;
+  const provider = pending.session.provider ?? "codex";
   return {
     requestId: pending.requestId,
     itemId: pending.params.itemId,
     approvalType: pending.approvalType ?? "file",
-    reason: pending.params.reason ?? "Codex wants to update the research workspace.",
+    provider,
+    agentName: providerName(provider),
+    reason: pending.params.reason ?? `${providerName(provider)} wants to update the research workspace.`,
     diff: pending.diff,
     files: publicReviewFiles(pending.reviewFiles ?? []),
     ...(pending.writePaths ? { writePaths: pending.writePaths } : {}),
@@ -1739,16 +1846,27 @@ function rejectedApprovalResult(pending, cancel = false) {
   return { decision: cancel ? "cancel" : "decline" };
 }
 
+function resolveExternalApproval(pending, result) {
+  const waiter = externalApprovalWaiters.get(pending.requestId);
+  if (!waiter) return;
+  externalApprovalWaiters.delete(pending.requestId);
+  waiter.resolve(result);
+}
+
 function armApprovalTimeout(pending) {
   if (pending.timeout) clearTimeout(pending.timeout);
   const remaining = Math.max(0, pending.expiresAt - Date.now());
   pending.timeout = setTimeout(() => {
     if (pendingApprovals.get(pending.requestId) !== pending || pending.resolving) return;
     pendingApprovals.delete(pending.requestId);
-    try {
-      codexClient.respond(pending.rpcId, rejectedApprovalResult(pending));
-    } catch {
-      // The app-server may have exited at the same time as the approval expired.
+    if (pending.source === "external") {
+      resolveExternalApproval(pending, { decision: "decline", expired: true });
+    } else {
+      try {
+        codexClient.respond(pending.rpcId, rejectedApprovalResult(pending));
+      } catch {
+        // The app-server may have exited at the same time as the approval expired.
+      }
     }
     broadcastAgent(pending.params.threadId, pending.params.turnId, {
       type: "error",
@@ -1899,8 +2017,9 @@ async function handleCodexServerRequest(message) {
 }
 
 async function createUndoSnapshot(pending) {
+  const agentName = providerName(pending.session.provider ?? "codex");
   if (!Array.isArray(pending.reviewGuards) || !Array.isArray(pending.expectedAfter)) {
-    throw new HttpError(409, "The reviewed filesystem state is unavailable. Ask Codex to prepare a fresh change.");
+    throw new HttpError(409, `The reviewed filesystem state is unavailable. Ask ${agentName} to prepare a fresh change.`);
   }
   const expectedByPath = new Map(pending.expectedAfter.map((entry) => [entry.absolutePath, entry]));
   const requestedPaths = new Set(pending.paths.map((entry) => entry.path));
@@ -1936,7 +2055,7 @@ async function createUndoSnapshot(pending) {
       throw new HttpError(403, "A reviewed file left the research workspace.");
     }
     if (current.exists !== guard.exists) {
-      throw new HttpError(409, `${guard.path} changed while the proposal was open. Ask Codex to prepare a fresh change.`);
+      throw new HttpError(409, `${guard.path} changed while the proposal was open. Ask ${agentName} to prepare a fresh change.`);
     }
     revalidated.push(current);
 
@@ -1960,7 +2079,7 @@ async function createUndoSnapshot(pending) {
       throw new HttpError(403, "Agent write targets may not be symbolic or hard-linked files.");
     }
     if (sha256(buffer) !== guard.hash) {
-      throw new HttpError(409, `${guard.path} changed while the proposal was open. Ask Codex to prepare a fresh change.`);
+      throw new HttpError(409, `${guard.path} changed while the proposal was open. Ask ${agentName} to prepare a fresh change.`);
     }
     files.push({
       path: current.path,
@@ -1980,6 +2099,7 @@ async function createUndoSnapshot(pending) {
     threadId: pending.params.threadId,
     turnId: pending.params.turnId,
     itemId: pending.params.itemId,
+    provider: pending.session.provider ?? "codex",
     createdAt: Date.now(),
     files,
     applied: false,
@@ -2005,6 +2125,87 @@ function discardUndoSnapshot(snapshot) {
   if (snapshotsByItem.get(key) === snapshot.id) snapshotsByItem.delete(key);
 }
 
+async function restoreSnapshotFiles(snapshot) {
+  for (const saved of snapshot.files) {
+    const checked = await safeApprovalPath(snapshot.researchRoot, saved.path, { mustExist: false });
+    if (checked.path !== saved.path) throw new Error("A rollback target now uses a link.");
+    if (saved.existed) {
+      const tempPath = `${saved.path}.agent-rollback-${randomUUID()}.tmp`;
+      await fs.writeFile(tempPath, saved.bytes, { flag: "wx", mode: saved.mode ?? 0o600 });
+      try {
+        if (saved.mode != null) await fs.chmod(tempPath, saved.mode);
+        await fs.rename(tempPath, saved.path);
+      } catch (error) {
+        await fs.unlink(tempPath).catch(() => {});
+        throw error;
+      }
+    } else if (checked.exists) {
+      await fs.unlink(saved.path);
+    }
+  }
+}
+
+async function applyExternalApproval(pending, snapshot) {
+  const root = pending.session.researchRoot;
+  const savedByPath = new Map(snapshot.files.map((saved) => [saved.path, saved]));
+  const staged = [];
+  try {
+    for (const file of pending.reviewFiles) {
+      const target = await safeApprovalPath(root, file.path, { mustExist: false });
+      if (file.movePath) throw new HttpError(400, "Alternate providers cannot propose file moves.");
+      const saved = savedByPath.get(target.path);
+      if (!saved) throw new HttpError(409, "The approved proposal target set changed.");
+      if (file.kind === "delete") {
+        staged.push({ target: target.path, kind: "delete", tempPath: null });
+        continue;
+      }
+      const tempPath = `${target.path}.agent-apply-${randomUUID()}.tmp`;
+      await fs.writeFile(tempPath, Buffer.from(file.after, "utf8"), {
+        flag: "wx",
+        mode: saved.mode ?? 0o600,
+      });
+      staged.push({ target: target.path, kind: file.kind, tempPath });
+    }
+
+    // Recheck every target after staging and before the first mutation.
+    for (const saved of snapshot.files) {
+      const current = await safeApprovalPath(root, saved.path, { mustExist: false });
+      if (current.path !== saved.path || current.exists !== saved.existed) {
+        throw new HttpError(409, "A reviewed file changed before the proposal could be applied.");
+      }
+      if (current.exists) {
+        const stat = await fs.lstat(current.path);
+        if (stat.isSymbolicLink() || stat.nlink > 1 || sha256(await fs.readFile(current.path)) !== sha256(saved.bytes)) {
+          throw new HttpError(409, "A reviewed file changed before the proposal could be applied.");
+        }
+      }
+    }
+
+    for (const item of staged) {
+      if (item.kind === "delete") await fs.unlink(item.target);
+      else await fs.rename(item.tempPath, item.target);
+      item.tempPath = null;
+    }
+    return await finalizeUndoSnapshot(snapshot, "completed");
+  } catch (error) {
+    for (const item of staged) {
+      if (item.tempPath) await fs.unlink(item.tempPath).catch(() => {});
+    }
+    try {
+      await restoreSnapshotFiles(snapshot);
+    } catch (rollbackError) {
+      snapshot.applied = false;
+      snapshot.applyStatus = "rollbackError";
+      snapshot.applyError = `Apply failed and rollback was incomplete: ${rollbackError.message}`;
+      throw new HttpError(500, snapshot.applyError, "rollback_failed");
+    }
+    snapshot.applied = false;
+    snapshot.applyStatus = "applyError";
+    snapshot.applyError = error.message;
+    throw error;
+  }
+}
+
 async function decideApproval(body) {
   const requestId = assertString(body.requestId, "requestId", { maxLength: 256 });
   if (!["accept", "decline", "cancel"].includes(body.decision)) {
@@ -2025,22 +2226,37 @@ async function decideApproval(body) {
       throw new HttpError(403, "Approval does not belong to the selected project.");
     }
     if (Date.now() >= pending.expiresAt) {
-      throw new HttpError(409, "The approval expired. Ask Codex to prepare a fresh request.");
+      throw new HttpError(409, `The approval expired. Ask ${providerName(pending.session.provider ?? "codex")} to prepare a fresh request.`);
     }
 
     const permissionApproval = pending.approvalType === "permission";
     if (body.decision === "accept" && !permissionApproval) snapshot = await createUndoSnapshot(pending);
 
     const terminalKey = turnKey(pending.params.threadId, pending.params.turnId);
+    const externalApproval = pending.source === "external";
     const requestIsCurrent = pendingApprovals.get(requestId) === pending
-      && pending.session.generation === codexClient.generation
-      && !terminalTurns.has(terminalKey);
+      && !terminalTurns.has(terminalKey)
+      && (externalApproval || pending.session.generation === codexClient.generation);
     if (!requestIsCurrent) {
       if (pendingApprovals.get(requestId) === pending) {
         clearTimeout(pending.timeout);
         pendingApprovals.delete(requestId);
       }
-      throw new HttpError(409, "This review is no longer attached to an active Codex turn.");
+      throw new HttpError(409, "This review is no longer attached to an active agent turn.");
+    }
+
+    if (externalApproval) {
+      if (permissionApproval) throw new HttpError(400, "Alternate providers do not request direct write permissions.");
+      if (body.decision === "accept") await applyExternalApproval(pending, snapshot);
+      responseAttempted = true;
+      pendingApprovals.delete(requestId);
+      resolveExternalApproval(pending, { decision: body.decision, snapshotId: snapshot?.id ?? null });
+      return {
+        ok: true,
+        approvalType: "file",
+        decision: body.decision,
+        snapshotId: snapshot?.id ?? null,
+      };
     }
 
     if (permissionApproval && body.decision === "accept") {
@@ -2068,7 +2284,7 @@ async function decideApproval(body) {
     discardUndoSnapshot(snapshot);
     if (pendingApprovals.get(requestId) === pending) {
       const canRetry = !responseAttempted
-        && pending.session.generation === codexClient.generation
+        && (pending.source === "external" || pending.session.generation === codexClient.generation)
         && !terminalTurns.has(turnKey(pending.params.threadId, pending.params.turnId));
       if (canRetry) {
         pending.resolving = false;
@@ -2084,6 +2300,12 @@ async function decideApproval(body) {
 
 async function agentTurnStatus(body) {
   const roots = await canonicalRoots(body.researchRoot, body.paperRoot);
+  let provider;
+  try {
+    provider = normalizeProvider(body.provider);
+  } catch (error) {
+    throw new HttpError(error.status ?? 400, error.message, error.code ?? "unsupported_provider");
+  }
   const requestedThreadId = body.threadId == null || body.threadId === ""
     ? null
     : assertString(body.threadId, "threadId", { maxLength: 256 });
@@ -2094,12 +2316,17 @@ async function agentTurnStatus(body) {
       .filter((candidate) => (
         candidate.researchRoot === roots.researchRoot
         && candidate.paperRoot === roots.paperRoot
+        && (candidate.provider ?? "codex") === provider
       ))
       .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null;
   }
   if (
     active
-    && (active.researchRoot !== roots.researchRoot || active.paperRoot !== roots.paperRoot)
+    && (
+      active.researchRoot !== roots.researchRoot
+      || active.paperRoot !== roots.paperRoot
+      || (active.provider ?? "codex") !== provider
+    )
   ) {
     active = null;
   }
@@ -2109,10 +2336,12 @@ async function agentTurnStatus(body) {
     : [...pendingApprovals.values()].find((candidate) => (
       candidate.session.researchRoot === roots.researchRoot
       && candidate.session.paperRoot === roots.paperRoot
+      && (candidate.session.provider ?? "codex") === provider
     )) ?? null;
   const scopedApproval = approval
     && approval.session.researchRoot === roots.researchRoot
     && approval.session.paperRoot === roots.paperRoot
+    && (approval.session.provider ?? "codex") === provider
     ? approval
     : null;
   const recoveredTurn = active ?? (scopedApproval ? {
@@ -2122,6 +2351,7 @@ async function agentTurnStatus(body) {
     label: "Waiting for your review",
     startedAt: scopedApproval.createdAt,
     lastActivityAt: scopedApproval.createdAt,
+    provider,
   } : null);
 
   return {
@@ -2134,6 +2364,12 @@ async function agentTurnStatus(body) {
 
 async function stopAgentTurn(body) {
   const roots = await canonicalRoots(body.researchRoot, body.paperRoot);
+  let provider;
+  try {
+    provider = normalizeProvider(body.provider);
+  } catch (error) {
+    throw new HttpError(error.status ?? 400, error.message, error.code ?? "unsupported_provider");
+  }
   const suppliedThreadId = body.threadId == null || body.threadId === ""
     ? null
     : assertString(body.threadId, "threadId", { maxLength: 256 });
@@ -2143,6 +2379,7 @@ async function stopAgentTurn(body) {
       .filter((candidate) => (
         candidate.researchRoot === roots.researchRoot
         && candidate.paperRoot === roots.paperRoot
+        && (candidate.provider ?? "codex") === provider
       ))
       .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null;
   }
@@ -2151,17 +2388,20 @@ async function stopAgentTurn(body) {
     : [...pendingApprovals.values()].filter((candidate) => (
       candidate.session.researchRoot === roots.researchRoot
       && candidate.session.paperRoot === roots.paperRoot
+      && (candidate.session.provider ?? "codex") === provider
     ));
   const scopedActive = active
     && active.researchRoot === roots.researchRoot
     && active.paperRoot === roots.paperRoot
+    && (active.provider ?? "codex") === provider
     ? active
     : null;
   approvals = approvals.filter((approval) => (
     approval.session.researchRoot === roots.researchRoot
     && approval.session.paperRoot === roots.paperRoot
+    && (approval.session.provider ?? "codex") === provider
   ));
-  const ownedSession = suppliedThreadId ? agentSessions.get(suppliedThreadId) : null;
+  const ownedSession = provider === "codex" && suppliedThreadId ? agentSessions.get(suppliedThreadId) : null;
   const sessionMatches = ownedSession
     && ownedSession.researchRoot === roots.researchRoot
     && ownedSession.paperRoot === roots.paperRoot;
@@ -2176,7 +2416,7 @@ async function stopAgentTurn(body) {
         approvalDeclined: false,
       };
     }
-    throw new HttpError(404, "No active Codex turn was found for this paper.");
+    throw new HttpError(404, `No active ${providerName(provider)} turn was found for this paper.`);
   }
   const requestedThreadId = suppliedThreadId
     ?? scopedActive?.threadId
@@ -2187,7 +2427,7 @@ async function stopAgentTurn(body) {
     : assertString(body.turnId, "turnId", { maxLength: 256 });
   const turnId = scopedActive?.turnId ?? approvals[0].params.turnId;
   if (requestedTurnId && requestedTurnId !== turnId) {
-    throw new HttpError(409, "That Codex turn is no longer active.");
+    throw new HttpError(409, `That ${providerName(provider)} turn is no longer active.`);
   }
   approvals = approvals.filter((approval) => approval.params.turnId === turnId);
   if (scopedActive?.status === "interrupting") {
@@ -2201,7 +2441,42 @@ async function stopAgentTurn(body) {
     };
   }
   if (approvals.some((approval) => approval.resolving)) {
-    throw new HttpError(409, "A review decision is already being finalized. Wait for it to finish before stopping Codex.");
+    throw new HttpError(409, `A review decision is already being finalized. Wait for it to finish before stopping ${providerName(provider)}.`);
+  }
+
+  if (provider !== "codex") {
+    externalCancelledTurns.add(turnKey(requestedThreadId, turnId));
+    let approvalDeclined = false;
+    for (const approval of approvals) {
+      approval.resolving = true;
+      clearTimeout(approval.timeout);
+      pendingApprovals.delete(approval.requestId);
+      resolveExternalApproval(approval, { decision: "cancel" });
+      approvalDeclined = true;
+    }
+    const running = externalProcesses.get(turnKey(requestedThreadId, turnId));
+    touchActiveTurn(requestedThreadId, turnId, {
+      status: "interrupting",
+      label: `Stopping ${providerName(provider)}…`,
+    });
+    broadcastAgent(requestedThreadId, turnId, {
+      type: "status",
+      provider,
+      label: `Stopping ${providerName(provider)}…`,
+    });
+    if (running) {
+      running.stopped = true;
+      running.child.kill("SIGTERM");
+      setTimeout(() => running.child.kill("SIGKILL"), 1_500).unref();
+    }
+    return {
+      ok: true,
+      stopped: true,
+      threadId: requestedThreadId,
+      turnId,
+      status: "interrupting",
+      approvalDeclined,
+    };
   }
 
   let approvalDeclined = false;
@@ -2489,6 +2764,276 @@ async function agentPrompt(body, researchRoot) {
   return context.join("\n");
 }
 
+function completeExternalTurn(session, turnId, status = "completed", undoAvailable = false) {
+  const turn = { id: turnId, status };
+  const key = turnKey(session.threadId, turnId);
+  terminalTurns.set(key, turn);
+  completedTurns.set(key, turn);
+  const expiry = setTimeout(() => {
+    terminalTurns.delete(key);
+    completedTurns.delete(key);
+  }, 60_000);
+  expiry.unref();
+  broadcastAgent(session.threadId, turnId, {
+    type: "completed",
+    provider: session.provider,
+    threadId: session.threadId,
+    turnId,
+    status,
+    undoAvailable,
+  });
+  forgetActiveTurn(session.threadId, turnId);
+  turnEvents.emit(key, turn);
+  externalCancelledTurns.delete(key);
+}
+
+function runExternalProvider(provider, invocation, session, turnId) {
+  const key = turnKey(session.threadId, turnId);
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        cwd: session.researchRoot,
+        env: providerEnvironment(provider),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({ code: null, signal: null, stdout: "", stderr: error.message, error });
+      return;
+    }
+    const running = { child, provider, session, turnId, stopped: false };
+    externalProcesses.set(key, running);
+    child.stdin.on("error", () => {});
+    child.stdin.end(invocation.prompt);
+    let stdout = "";
+    let stderr = "";
+    let capturedBytes = 0;
+    let truncated = false;
+    let timedOut = false;
+    let settled = false;
+    const capture = (target, chunk) => {
+      if (capturedBytes >= PROVIDER_OUTPUT_BYTES) {
+        truncated = true;
+        return target;
+      }
+      const remaining = PROVIDER_OUTPUT_BYTES - capturedBytes;
+      const slice = chunk.subarray(0, remaining);
+      capturedBytes += slice.length;
+      if (slice.length < chunk.length) truncated = true;
+      return target + slice.toString("utf8");
+    };
+    child.stdout.on("data", (chunk) => {
+      stdout = capture(stdout, chunk);
+      touchActiveTurn(session.threadId, turnId);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = capture(stderr, chunk);
+      touchActiveTurn(session.threadId, turnId);
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 1_500).unref();
+    }, TURN_TIMEOUT_MS);
+    timer.unref();
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (externalProcesses.get(key) === running) externalProcesses.delete(key);
+      resolve({ ...result, stdout, stderr, truncated, timedOut, stopped: running.stopped });
+    };
+    child.on("error", (error) => finish({ code: null, signal: null, error }));
+    child.on("close", (code, signal) => finish({ code, signal }));
+  });
+}
+
+async function proposalChangesForReview(session, proposal) {
+  const changes = [];
+  for (const proposed of proposal.changes) {
+    const proposedPath = assertString(proposed.path, "proposed path", { maxLength: 16_384 });
+    if (path.isAbsolute(proposedPath)) {
+      throw new HttpError(403, `${providerName(session.provider)} returned an absolute file path.`);
+    }
+    const normalized = path.normalize(proposedPath);
+    if (normalized === "." || normalized.startsWith(`..${path.sep}`) || normalized === "..") {
+      throw new HttpError(403, `${providerName(session.provider)} returned a path outside the research workspace.`);
+    }
+    const target = await safeApprovalPath(session.researchRoot, normalized, { mustExist: false });
+    if (proposed.action === "delete") {
+      if (!target.exists) {
+        throw new HttpError(409, `${relativePortable(session.researchRoot, target.path)} no longer exists.`);
+      }
+      changes.push({ path: target.path, kind: { type: "delete" }, diff: "" });
+      continue;
+    }
+    if (Buffer.byteLength(proposed.content, "utf8") > MAX_TEXT_BYTES || proposed.content.includes("\0")) {
+      throw new HttpError(413, `${relativePortable(session.researchRoot, target.path)} is not a supported UTF-8 text proposal.`);
+    }
+    const before = target.exists
+      ? (await readTextFile(session.researchRoot, target.path)).content
+      : "";
+    if (target.exists && before === proposed.content) continue;
+    const displayPath = relativePortable(session.researchRoot, target.path);
+    changes.push({
+      path: target.path,
+      kind: { type: target.exists ? "update" : "add" },
+      diff: proposed.content === "" && !target.exists
+        ? ""
+        : createTwoFilesPatch(displayPath, displayPath, before, proposed.content, "current", "proposed"),
+    });
+  }
+  return changes;
+}
+
+async function streamExternalAgentTurn(res, body, provider, roots, prompt, requestedEffort) {
+  const name = providerName(provider);
+  if (provider === "claude" && requestedEffort && !["low", "medium", "high"].includes(requestedEffort)) {
+    throw new HttpError(400, "Claude Code effort must be low, medium, or high.");
+  }
+  const requestedThreadId = body.threadId == null || body.threadId === ""
+    ? null
+    : assertString(body.threadId, "threadId", { maxLength: 256 });
+  if (requestedThreadId && !requestedThreadId.startsWith(`${provider}:`)) {
+    throw new HttpError(409, `That conversation belongs to a different agent provider.`);
+  }
+  const provisionalRawId = randomUUID();
+  const threadId = requestedThreadId ?? providerThreadId(provider, provisionalRawId);
+  const turnId = randomUUID();
+  const session = {
+    threadId,
+    researchRoot: roots.researchRoot,
+    paperRoot: roots.paperRoot,
+    provider,
+    generation: null,
+  };
+  const active = registerActiveTurn(session, { id: turnId, status: "inProgress" });
+  const sink = { res, threadId, turnId };
+  agentSinks.add(sink);
+  res.once("close", () => agentSinks.delete(sink));
+  writeNdjson(res, { type: "thread", provider, threadId });
+  writeNdjson(res, {
+    type: "turn",
+    provider,
+    threadId,
+    turnId,
+    status: active?.status ?? "inProgress",
+    startedAt: active?.startedAt,
+    lastActivityAt: active?.lastActivityAt,
+  });
+  writeNdjson(res, { type: "status", provider, label: `${name} is reading the research workspace…` });
+
+  try {
+    const invocation = providerInvocation(provider, {
+      researchRoot: roots.researchRoot,
+      paperRoot: roots.paperRoot,
+      userPrompt: prompt,
+      threadId: requestedThreadId,
+      sessionId: provider === "claude" && !requestedThreadId ? provisionalRawId : null,
+      reasoningEffort: provider === "claude" ? requestedEffort : null,
+    });
+    const result = await runExternalProvider(provider, invocation, session, turnId);
+    if (result.stopped || externalCancelledTurns.has(turnKey(session.threadId, turnId))) {
+      completeExternalTurn(session, turnId, "interrupted");
+      return;
+    }
+    if (result.timedOut) throw new Error(`${name} timed out after 45 minutes.`);
+    if (result.truncated) throw new Error(`${name} returned more than 24 MiB; ask for a smaller change.`);
+    if (result.code !== 0) {
+      const detail = `${result.stderr}\n${result.stdout}`.trim().slice(-4_000);
+      throw new Error(detail || `${name} exited before returning a proposal.`);
+    }
+    const parsed = parseProviderResult(provider, result.stdout);
+    if (parsed.sessionId) {
+      const nextThreadId = providerThreadId(provider, parsed.sessionId);
+      if (nextThreadId !== session.threadId) {
+        const previousThreadId = session.threadId;
+        const current = activeTurns.get(session.threadId);
+        activeTurns.delete(session.threadId);
+        session.threadId = nextThreadId;
+        sink.threadId = nextThreadId;
+        if (current) {
+          current.threadId = nextThreadId;
+          activeTurns.set(nextThreadId, current);
+        }
+        const previousTurnKey = turnKey(previousThreadId, turnId);
+        if (externalCancelledTurns.delete(previousTurnKey)) {
+          externalCancelledTurns.add(turnKey(nextThreadId, turnId));
+        }
+        writeNdjson(res, { type: "thread", provider, threadId: nextThreadId });
+      }
+    }
+    if (parsed.proposal.summary) {
+      broadcastAgent(session.threadId, turnId, { type: "delta", provider, text: parsed.proposal.summary });
+    }
+    const changes = await proposalChangesForReview(session, parsed.proposal);
+    if (externalCancelledTurns.has(turnKey(session.threadId, turnId))) {
+      completeExternalTurn(session, turnId, "interrupted");
+      return;
+    }
+    if (changes.length === 0) {
+      completeExternalTurn(session, turnId, "completed");
+      return;
+    }
+    touchActiveTurn(session.threadId, turnId, { label: "Preparing reviewed source changes…" });
+    const materialized = await materializeReviewFiles(session, changes);
+    const requestId = `${provider}-${randomUUID()}`;
+    const itemId = randomUUID();
+    const diff = materialized.files.map((file) => file.reviewDiff).join("\n");
+    const pending = {
+      requestId,
+      rpcId: null,
+      source: "external",
+      approvalType: "file",
+      params: {
+        threadId: session.threadId,
+        turnId,
+        itemId,
+        reason: `${name} prepared ${materialized.files.length === 1 ? "a source change" : `${materialized.files.length} source changes`} for review.`,
+      },
+      session,
+      paths: materialized.reviewGuards.map((guard) => ({ path: guard.absolutePath, exists: guard.exists })),
+      changes,
+      reviewFiles: materialized.files,
+      reviewGuards: materialized.reviewGuards,
+      expectedAfter: materialized.expectedAfter,
+      diff,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
+      resolving: false,
+      timeout: null,
+    };
+    const decision = new Promise((resolve) => externalApprovalWaiters.set(requestId, { resolve }));
+    pendingApprovals.set(requestId, pending);
+    armApprovalTimeout(pending);
+    touchActiveTurn(session.threadId, turnId, { label: "Waiting for your review" });
+    broadcastAgent(session.threadId, turnId, {
+      type: "approval",
+      provider,
+      agentName: name,
+      requestId,
+      itemId,
+      approvalType: "file",
+      reason: pending.params.reason,
+      diff,
+      files: publicReviewFiles(materialized.files),
+    });
+    const outcome = await decision;
+    completeExternalTurn(
+      session,
+      turnId,
+      outcome.expired || outcome.decision === "cancel" ? "interrupted" : "completed",
+      Boolean(outcome.snapshotId),
+    );
+  } catch (error) {
+    broadcastAgent(session.threadId, turnId, { type: "error", provider, message: error.message });
+    completeExternalTurn(session, turnId, "failed");
+  } finally {
+    agentSinks.delete(sink);
+    if (!res.writableEnded && !res.destroyed) res.end();
+  }
+}
+
 function waitForTurn(threadId, turnId, res) {
   const key = turnKey(threadId, turnId);
   const completed = completedTurns.get(key);
@@ -2513,6 +3058,12 @@ function waitForTurn(threadId, turnId, res) {
 async function streamAgentTurn(res, body) {
   const { researchRoot, paperRoot } = await canonicalRoots(body.researchRoot, body.paperRoot);
   const prompt = await agentPrompt(body, researchRoot);
+  let provider;
+  try {
+    provider = normalizeProvider(body.provider);
+  } catch (error) {
+    throw new HttpError(error.status ?? 400, error.message, error.code ?? "unsupported_provider");
+  }
   const requestedEffort = body.reasoningEffort == null || body.reasoningEffort === ""
     ? null
     : assertString(body.reasoningEffort, "reasoningEffort", { maxLength: 64 });
@@ -2521,7 +3072,19 @@ async function streamAgentTurn(res, body) {
     "Transfer-Encoding": "chunked",
     Connection: "keep-alive",
   });
-  writeNdjson(res, { type: "status", label: "Connecting to your Codex subscription…" });
+  writeNdjson(res, { type: "status", provider, label: `Connecting to your ${AGENT_PROVIDERS[provider].subscription} subscription…` });
+
+  if (EXTERNAL_PROVIDER_IDS.includes(provider)) {
+    await streamExternalAgentTurn(
+      res,
+      body,
+      provider,
+      { researchRoot, paperRoot },
+      prompt,
+      requestedEffort,
+    );
+    return;
+  }
 
   let sink = null;
   try {
@@ -2636,9 +3199,17 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, await getHealth());
       return;
     }
-    if (req.method === "GET" && url.pathname === "/api/codex/settings") {
+    if (req.method === "GET" && (url.pathname === "/api/codex/settings" || url.pathname === "/api/agent/settings")) {
       const researchRoot = await canonicalDirectory(url.searchParams.get("researchRoot"), "researchRoot");
-      sendJson(res, 200, await codexSettingsForProject(researchRoot));
+      let provider;
+      try {
+        provider = url.pathname === "/api/codex/settings"
+          ? "codex"
+          : normalizeProvider(url.searchParams.get("provider"));
+      } catch (error) {
+        throw new HttpError(error.status ?? 400, error.message, error.code ?? "unsupported_provider");
+      }
+      sendJson(res, 200, await agentSettingsForProject(provider, researchRoot));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/folder/pick") {
@@ -2731,6 +3302,10 @@ server.on("clientError", (_error, socket) => {
 
 function shutdown() {
   codexClient.stop();
+  for (const running of externalProcesses.values()) {
+    running.stopped = true;
+    running.child.kill("SIGTERM");
+  }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2_000).unref();
 }
@@ -2750,6 +3325,7 @@ if (isMainModule) {
 export {
   HttpError,
   activeTurns,
+  applyExternalApproval,
   agentSessions,
   agentTurnStatus,
   changeStatus,
@@ -2760,6 +3336,7 @@ export {
   pendingApprovals,
   permissionsForResearchRequest,
   preparePermissionGrant,
+  proposalChangesForReview,
   publicPendingApproval,
   publicSnapshotStatus,
   readTextFile,

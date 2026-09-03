@@ -36,7 +36,7 @@ test("keeps the product local and subscription-backed", async () => {
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
   ]);
 
-  assert.match(workspace, /Codex subscription/);
+  assert.match(workspace, /AGENT_SUBSCRIPTIONS/);
   assert.match(workspace, /no API key/i);
   assert.match(workspace, /DiffViewer/);
   assert.match(workspace, /PdfViewer/);
@@ -46,6 +46,29 @@ test("keeps the product local and subscription-backed", async () => {
   assert.doesNotMatch(packageJson, /vinext (?:dev|start) -p 3000/);
   assert.doesNotMatch(packageJson, /"openai"\s*:/);
   assert.doesNotMatch(layout, /codex-preview|Starter Project/);
+});
+
+test("offers isolated Codex, Claude Code, and Cursor subscription adapters", async () => {
+  const [workspace, companion, providers] = await Promise.all([
+    readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../server/index.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../server/providers.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(workspace, /<option value="codex">Codex<\/option>/);
+  assert.match(workspace, /<option value="claude">Claude Code<\/option>/);
+  assert.match(workspace, /<option value="cursor">Cursor Agent<\/option>/);
+  assert.match(workspace, /provider: agentProvider/);
+  assert.match(workspace, /Uses your.*subscription · no API key/);
+  assert.match(companion, /streamExternalAgentTurn/);
+  assert.match(companion, /applyExternalApproval/);
+  assert.match(providers, /"--mode=ask"/);
+  assert.match(providers, /"--sandbox=enabled"/);
+  assert.match(providers, /"--safe-mode"/);
+  assert.match(providers, /"Read,Glob,Grep"/);
+  assert.doesNotMatch(providers, /"--force"|"--yolo"|dangerously-skip-permissions/);
+  assert.match(providers, /delete env\.ANTHROPIC_API_KEY/);
+  assert.match(providers, /delete env\.CURSOR_API_KEY/);
 });
 
 test("makes local save destinations and persistence state explicit", async () => {
@@ -93,7 +116,7 @@ test("makes local save destinations and persistence state explicit", async () =>
     ["const chooseWorkspace", "const choosePaperFolder"],
     ["const choosePaperFolder", "const copyLocalPath"],
     ["const locateSourceInPdf", "const handlePdfSelection"],
-    ["const sendToCodex", "const decideApproval"],
+    ["const sendToAgent", "const decideApproval"],
     ["const undoLastChange", "const explorerMaximum"],
   ];
   for (const [startMarker, endMarker] of guardedSections) {
@@ -135,7 +158,7 @@ test("preserves the PDF reading position across recompiles of the same paper", a
   assert.doesNotMatch(preview, /buildId.*\? .*key|key=.*buildId/);
 });
 
-test("keeps the Codex conversation pinned to its newest message", async () => {
+test("keeps the agent conversation pinned to its newest message", async () => {
   const workspace = await readFile(
     new URL("../app/components/PaperWorkspace.tsx", import.meta.url),
     "utf8",
@@ -219,7 +242,8 @@ test("scopes the explorer to the paper and forwards selection intelligence", asy
     readFile(new URL("../server/index.mjs", import.meta.url), "utf8"),
   ]);
 
-  assert.match(workspace, /Codex intelligence level/);
+  assert.match(workspace, /AI agent provider/);
+  assert.match(workspace, /agentName} intelligence level/);
   assert.match(workspace, /reasoningEffort/);
   assert.match(workspace, /Selection is the primary target/);
   assert.match(fileTree, /aria-label="Paper files"/);

@@ -18,6 +18,7 @@ import {
   pendingApprovals,
   permissionsForResearchRequest,
   preparePermissionGrant,
+  proposalChangesForReview,
   readTextFile,
   saveTextFile,
   stopAgentTurn,
@@ -275,6 +276,84 @@ test("reviews, finalizes, and undoes updates and additions outside paperRoot but
   assert.deepEqual(undone.files, ["analysis/rerun.py", "generated/figure.json"]);
   assert.equal(await readFile(scriptPath, "utf8"), "print('old')\n");
   await assert.rejects(readFile(metadataPath), (error) => error.code === "ENOENT");
+});
+
+test("applies alternate-provider proposals only after approval and preserves Undo", async (t) => {
+  const { researchRoot, paperRoot } = await fixture(t);
+  const session = {
+    researchRoot,
+    paperRoot,
+    provider: "claude",
+    threadId: "claude:test-thread",
+  };
+  const sourcePath = path.join(paperRoot, "main.tex");
+  const addedPath = path.join(researchRoot, "analysis.md");
+  await writeFile(sourcePath, "before\n");
+
+  const changes = await proposalChangesForReview(session, {
+    summary: "Prepared two changes.",
+    changes: [
+      { path: "paper/main.tex", action: "write", content: "after\n" },
+      { path: "analysis.md", action: "write", content: "notes\n" },
+    ],
+  });
+  const materialized = await materializeReviewFiles(session, changes);
+  const requestId = `external-${Date.now()}-${Math.random()}`;
+  pendingApprovals.set(requestId, {
+    requestId,
+    source: "external",
+    approvalType: "file",
+    params: { threadId: session.threadId, turnId: "turn", itemId: "item" },
+    session,
+    paths: materialized.reviewGuards.map(({ absolutePath, exists }) => ({ path: absolutePath, exists })),
+    changes,
+    reviewFiles: materialized.files,
+    reviewGuards: materialized.reviewGuards,
+    expectedAfter: materialized.expectedAfter,
+    diff: materialized.files.map((file) => file.reviewDiff).join("\n"),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60_000,
+    resolving: false,
+    timeout: null,
+  });
+  t.after(() => pendingApprovals.delete(requestId));
+
+  assert.equal(await readFile(sourcePath, "utf8"), "before\n");
+  await assert.rejects(readFile(addedPath), (error) => error.code === "ENOENT");
+
+  const accepted = await decideApproval({
+    researchRoot,
+    paperRoot,
+    requestId,
+    decision: "accept",
+  });
+  assert.equal(accepted.ok, true);
+  assert.ok(accepted.snapshotId);
+  assert.equal(await readFile(sourcePath, "utf8"), "after\n");
+  assert.equal(await readFile(addedPath, "utf8"), "notes\n");
+
+  await undoChanges({ researchRoot, paperRoot, snapshotId: accepted.snapshotId });
+  assert.equal(await readFile(sourcePath, "utf8"), "before\n");
+  await assert.rejects(readFile(addedPath), (error) => error.code === "ENOENT");
+});
+
+test("rejects alternate-provider paths outside the research root", async (t) => {
+  const { researchRoot, paperRoot } = await fixture(t);
+  const session = { researchRoot, paperRoot, provider: "cursor" };
+  await assert.rejects(
+    proposalChangesForReview(session, {
+      summary: "Unsafe proposal.",
+      changes: [{ path: "../escape.tex", action: "write", content: "escape\n" }],
+    }),
+    (error) => error.status === 403 && /outside the research workspace/i.test(error.message),
+  );
+  await assert.rejects(
+    proposalChangesForReview(session, {
+      summary: "Unsafe proposal.",
+      changes: [{ path: path.join(researchRoot, "paper/main.tex"), action: "write", content: "escape\n" }],
+    }),
+    (error) => error.status === 403 && /absolute file path/i.test(error.message),
+  );
 });
 
 test("rejects agent write sources, move destinations, and symlink escapes outside researchRoot", async (t) => {
@@ -596,7 +675,7 @@ test("rejects an approval response from a stale app-server generation", async (t
 
   await assert.rejects(
     decideApproval({ researchRoot, paperRoot, requestId, decision: "decline" }),
-    (error) => error.status === 409 && /no longer attached to an active Codex turn/i.test(error.message),
+    (error) => error.status === 409 && /no longer attached to an active agent turn/i.test(error.message),
   );
   assert.equal(pendingApprovals.has(requestId), false);
 });
