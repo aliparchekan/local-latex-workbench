@@ -15,6 +15,8 @@ export type ApprovalWriteTarget = {
 
 export type PendingApproval = {
   id: string | number;
+  provider?: "codex" | "claude" | "cursor";
+  agentName?: string;
   diff: string;
   approvalType?: "file" | "permission";
   reason?: string | null;
@@ -131,6 +133,7 @@ export function DiffViewer({
   onCheckStatus,
   onOpenFile,
 }: Props) {
+  const agentName = approval.agentName ?? "Codex";
   if (approval.approvalType === "permission") {
     const writeTargets = approval.writeTargets?.length
       ? approval.writeTargets
@@ -142,14 +145,14 @@ export function DiffViewer({
         <header className="diff-heading">
           <div className="diff-icon"><ShieldCheck size={17} /></div>
           <div>
-            <span className="eyebrow">Codex is waiting</span>
+            <span className="eyebrow">{agentName} is waiting</span>
             <h3>Allow research-support work?</h3>
           </div>
         </header>
 
         <p className="diff-reason">
           {approval.reason
-            ?? "Codex needs temporary write access to run local research work or generate supporting files."}
+            ?? `${agentName} needs temporary write access to run local research work or generate supporting files.`}
         </p>
 
         <div className="diff-files">
@@ -158,7 +161,7 @@ export function DiffViewer({
             <span>{writeTargets.length}</span>
           </div>
           <p className="diff-source-note">
-            Codex is asking to write research-support files at these locations for this turn only.
+            {agentName} is asking to write research-support files at these locations for this turn only.
             Network access stays off.
           </p>
           {writeTargets.length ? (
@@ -182,7 +185,7 @@ export function DiffViewer({
           ) : (
             <div className="diff-file-empty">
               <FileCode2 size={17} />
-              <span>Codex requested research-support write access, but did not provide a specific path.</span>
+              <span>{agentName} requested research-support write access, but did not provide a specific path.</span>
             </div>
           )}
 
@@ -225,7 +228,7 @@ export function DiffViewer({
       <header className="diff-heading">
         <div className="diff-icon"><ShieldCheck size={17} /></div>
         <div>
-          <span className="eyebrow">Codex is waiting</span>
+          <span className="eyebrow">{agentName} is waiting</span>
           <h3>Review changes</h3>
         </div>
       </header>
@@ -282,7 +285,7 @@ export function DiffViewer({
         ) : (
           <div className="diff-file-empty">
             <FileCode2 size={17} />
-            <span>Codex requested a source update. Review the source before approving.</span>
+            <span>{agentName} requested a source update. Review the source before approving.</span>
           </div>
         )}
       </div>

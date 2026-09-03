@@ -1,7 +1,7 @@
 {
   "name": "local-latex-workbench",
   "version": "0.1.0",
-  "description": "A local-first LaTeX workspace with side-by-side source, PDF, and reviewable Codex edits.",
+  "description": "A local-first LaTeX workspace with side-by-side source, PDF, and reviewable Codex, Claude Code, or Cursor edits.",
   "private": true,
   "license": "Apache-2.0",
   "author": "Ali Parchekani",

@@ -28,7 +28,8 @@ Changes should preserve these boundaries:
 - Manual and agent-authored source writes fail closed on stale files or unsafe paths.
 - Reviewable text changes are shown before acceptance.
 - Command write access is narrow, explicit, turn-scoped, and never silently enables network access.
-- The application uses the user's local Codex sign-in, not an embedded API key.
+- The application uses the user's local Codex, Claude Code, or Cursor sign-in, not an embedded API key.
+- New provider adapters must remain proposal-only unless their approval protocol can preserve the same visible diff, stale-file checks, and Undo boundary.
 - Private research data and generated build artifacts do not belong in this repository.
 
 Add or update regression tests whenever behavior changes. Keep pull requests focused and explain user-visible behavior, risks, and verification performed.

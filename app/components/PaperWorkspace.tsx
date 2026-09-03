@@ -35,9 +35,21 @@ import { ResizeHandle } from "./ResizeHandle";
 import { SourceEditor } from "./SourceEditor";
 import type { SourceFocusRequest } from "./SourceEditor";
 
+type AgentProvider = "codex" | "claude" | "cursor";
+
+type ProviderHealth = {
+  installed?: boolean;
+  authenticated?: boolean;
+  label?: string;
+  version?: string | null;
+};
+
 type Health = {
   ok: boolean;
-  codex?: { installed?: boolean; authenticated?: boolean; label?: string };
+  providers?: Partial<Record<AgentProvider, ProviderHealth>>;
+  codex?: ProviderHealth;
+  claude?: ProviderHealth;
+  cursor?: ProviderHealth;
   latex?: { installed?: boolean; label?: string };
 };
 
@@ -69,6 +81,8 @@ type ChatMessage = {
 
 type StreamEvent = {
   type: string;
+  provider?: AgentProvider;
+  agentName?: string;
   approvalType?: "file" | "permission";
   threadId?: string;
   turnId?: string;
@@ -103,6 +117,7 @@ type AgentTurnStatus = {
   label?: string;
   startedAt: number;
   lastActivityAt: number;
+  provider?: AgentProvider;
 };
 
 type AgentApprovalStatus = {
@@ -115,6 +130,8 @@ type AgentApprovalStatus = {
   writePaths?: string[];
   writeTargets?: ApprovalWriteTarget[];
   expiresAt?: number;
+  provider?: AgentProvider;
+  agentName?: string;
 };
 
 type AgentStatusResponse = {
@@ -163,7 +180,7 @@ type ReasoningOption = {
   description: string;
 };
 
-type CodexSettings = {
+type AgentSettings = {
   model: string | null;
   displayName: string | null;
   defaultReasoningEffort: string | null;
@@ -171,8 +188,23 @@ type CodexSettings = {
 };
 
 const LAST_PROJECT_KEY = "lattice:last-project";
-const threadKey = (root: string) => `lattice:thread:${root}`;
-const effortKey = (root: string) => `lattice:reasoning-effort:${root}`;
+const AGENT_PROVIDER_KEY = "lattice:agent-provider";
+const AGENT_NAMES: Record<AgentProvider, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  cursor: "Cursor Agent",
+};
+const AGENT_SUBSCRIPTIONS: Record<AgentProvider, string> = {
+  codex: "ChatGPT/Codex",
+  claude: "Claude",
+  cursor: "Cursor",
+};
+const threadKey = (root: string, provider: AgentProvider) => provider === "codex"
+  ? `lattice:thread:${root}`
+  : `lattice:thread:${provider}:${root}`;
+const effortKey = (root: string, provider: AgentProvider) => provider === "codex"
+  ? `lattice:reasoning-effort:${root}`
+  : `lattice:reasoning-effort:${provider}:${root}`;
 const PANE_LAYOUT_KEY = "lattice:pane-layout:v1";
 const DEFAULT_PANES = { explorerWidth: 224, agentWidth: 370, sourceRatio: 0.42 };
 const EXPLORER_MIN = 160;
@@ -347,6 +379,7 @@ function formatElapsed(milliseconds: number) {
 
 export function PaperWorkspace() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [agentProvider, setAgentProvider] = useState<AgentProvider>("codex");
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [mainFile, setMainFile] = useState<string | null>(null);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -371,7 +404,7 @@ export function PaperWorkspace() {
   const [turnMonitor, setTurnMonitor] = useState<TurnMonitor | null>(null);
   const [turnClock, setTurnClock] = useState(() => Date.now());
   const [stoppingTurn, setStoppingTurn] = useState(false);
-  const [codexSettings, setCodexSettings] = useState<CodexSettings | null>(null);
+  const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState("");
   const [latestDiff, setLatestDiff] = useState("");
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -390,6 +423,8 @@ export function PaperWorkspace() {
   const [sourceStacked, setSourceStacked] = useState(false);
   const [outerResizable, setOuterResizable] = useState(true);
   const [activeResize, setActiveResize] = useState<"columns" | "rows" | null>(null);
+  const agentName = AGENT_NAMES[agentProvider];
+  const providerHealth = health?.providers?.[agentProvider] ?? health?.[agentProvider];
   const projectRef = useRef<ProjectInfo | null>(null);
   const activePathRef = useRef<string | null>(null);
   const contentRef = useRef("");
@@ -477,12 +512,12 @@ export function PaperWorkspace() {
     setMonitoredTurn({
       threadId,
       turnId: null,
-      status: "Starting Codex…",
+      status: `Starting ${agentName}…`,
       startedAt,
       lastActivityAt: startedAt,
     });
     return startedAt;
-  }, [setMonitoredTurn]);
+  }, [agentName, setMonitoredTurn]);
 
   useEffect(() => {
     let restored: PaneLayout | null = null;
@@ -624,6 +659,8 @@ export function PaperWorkspace() {
     const approvalType = approval.approvalType ?? "file";
     const recovered: PendingApproval = {
       id: approval.requestId,
+      provider: approval.provider ?? agentProvider,
+      agentName: approval.agentName ?? agentName,
       approvalType,
       itemId: approval.itemId,
       reason: approval.reason,
@@ -646,24 +683,25 @@ export function PaperWorkspace() {
     setAgentStatus(approvalType === "permission"
       ? "Waiting for research access approval"
       : "Waiting for your review");
-  }, [activePath, pendingApproval, selection, showReviewFile, sourceFocusRequest]);
+  }, [activePath, agentName, agentProvider, pendingApproval, selection, showReviewFile, sourceFocusRequest]);
 
   const pollAgentStatus = useCallback(async (targetProject?: ProjectInfo | null) => {
     const statusProject = targetProject ?? project;
     if (!statusProject || agentStatusInFlightRef.current) return;
     agentStatusInFlightRef.current = true;
     try {
-      const storedThread = localStorage.getItem(threadKey(statusProject.researchRoot));
+      const storedThread = localStorage.getItem(threadKey(statusProject.researchRoot, agentProvider));
       const result = await api<AgentStatusResponse>("/api/agent/status", {
         method: "POST",
         body: JSON.stringify({
           researchRoot: statusProject.researchRoot,
           paperRoot: statusProject.paperRoot,
           threadId: storedThread,
+          provider: agentProvider,
         }),
       });
       if (result.turn?.threadId) {
-        localStorage.setItem(threadKey(statusProject.researchRoot), result.turn.threadId);
+        localStorage.setItem(threadKey(statusProject.researchRoot, agentProvider), result.turn.threadId);
       }
       if (result.active && result.turn) {
         setMonitoredTurn({
@@ -707,7 +745,7 @@ export function PaperWorkspace() {
     } finally {
       agentStatusInFlightRef.current = false;
     }
-  }, [approvalBusy, pendingApproval, project, recoverApproval, restoreReviewContext, setMonitoredTurn]);
+  }, [agentProvider, approvalBusy, pendingApproval, project, recoverApproval, restoreReviewContext, setMonitoredTurn]);
 
   const saveNow = useCallback(async (): Promise<boolean> => {
     if (saveQueueRef.current) return saveQueueRef.current;
@@ -993,9 +1031,10 @@ export function PaperWorkspace() {
   const checkApplyStatus = useCallback(async (manual = false) => {
     const activeApply = activeApplyRef.current;
     if (!activeApply || activeApply.settled) return;
+    const applyAgentName = activeApply.approval.agentName ?? "agent";
     if (!activeApply.snapshotId) {
       markApplyConfirmationDelayed(
-        "No apply receipt was received. Keep this review open while Codex finishes, then reload the paper if confirmation does not arrive.",
+        `No apply receipt was received. Keep this review open while ${applyAgentName} finishes, then reload the paper if confirmation does not arrive.`,
       );
       return;
     }
@@ -1015,7 +1054,7 @@ export function PaperWorkspace() {
       if (Date.now() >= activeApply.deadline || manual) {
         clearApplyPolling();
         markApplyConfirmationDelayed(
-          status.message ?? "Codex is still applying this change. Check again before editing the reviewed source.",
+          status.message ?? `${applyAgentName} is still applying this change. Check again before editing the reviewed source.`,
         );
       }
     } catch (reason) {
@@ -1071,6 +1110,10 @@ export function PaperWorkspace() {
     let active = true;
     async function connect() {
       try {
+        const storedProvider = localStorage.getItem(AGENT_PROVIDER_KEY);
+        if (storedProvider === "claude" || storedProvider === "cursor") {
+          setAgentProvider(storedProvider);
+        }
         const nextHealth = await api<Health>("/api/health");
         if (!active) return;
         setHealth(nextHealth);
@@ -1111,21 +1154,21 @@ export function PaperWorkspace() {
   useEffect(() => {
     if (!project) return;
     let active = true;
-    api<CodexSettings>(`/api/codex/settings?researchRoot=${encodeURIComponent(project.researchRoot)}`)
+    api<AgentSettings>(`/api/agent/settings?provider=${agentProvider}&researchRoot=${encodeURIComponent(project.researchRoot)}`)
       .then((settings) => {
         if (!active) return;
-        setCodexSettings(settings);
-        const stored = localStorage.getItem(effortKey(project.researchRoot)) ?? "";
+        setAgentSettings(settings);
+        const stored = localStorage.getItem(effortKey(project.researchRoot, agentProvider)) ?? "";
         const supported = settings.supportedReasoningEfforts.some(
           (option) => option.reasoningEffort === stored,
         );
         setReasoningEffort(supported ? stored : "");
       })
       .catch(() => {
-        if (active) setCodexSettings(null);
+        if (active) setAgentSettings(null);
       });
     return () => { active = false; };
-  }, [project]);
+  }, [agentProvider, project]);
 
   const chooseWorkspace = async () => {
     if (agentBusy || pendingApproval) return;
@@ -1329,16 +1372,16 @@ export function PaperWorkspace() {
     }
   };
 
-  const sendToCodex = async (suggestion?: string) => {
+  const sendToAgent = async (suggestion?: string) => {
     const message = (suggestion ?? prompt).trim();
     if (!message || !project || !mainFile || agentBusy || pendingApproval) return;
     if (!(await saveNow())) return;
     setPrompt("");
     setError(null);
     setAgentBusy(true);
-    setAgentStatus("Starting Codex…");
+    setAgentStatus(`Starting ${agentName}…`);
     setLatestDiff("");
-    const storedThread = localStorage.getItem(threadKey(project.researchRoot));
+    const storedThread = localStorage.getItem(threadKey(project.researchRoot, agentProvider));
     const startedAt = beginMonitoredTurn(storedThread);
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
@@ -1360,6 +1403,7 @@ export function PaperWorkspace() {
           mainFile,
           activePath,
           threadId: storedThread,
+          provider: agentProvider,
           reasoningEffort,
           prompt: message,
           selection,
@@ -1368,7 +1412,7 @@ export function PaperWorkspace() {
       });
       if (!response.ok || !response.body) {
         const body = await response.text();
-        throw new Error(body || `Codex request failed (${response.status})`);
+        throw new Error(body || `${agentName} request failed (${response.status})`);
       }
 
       const reader = response.body.getReader();
@@ -1378,14 +1422,14 @@ export function PaperWorkspace() {
       let activePresentedApproval: { id: string; approvalType: "file" | "permission" } | null = null;
       let applyLifecycleHandled = false;
       const consume = (event: StreamEvent) => {
-        if (event.threadId) localStorage.setItem(threadKey(project.researchRoot), event.threadId);
+        if (event.threadId) localStorage.setItem(threadKey(project.researchRoot, agentProvider), event.threadId);
         if (event.type !== "completed") {
           const currentTurn = turnMonitorRef.current;
           const activityAt = Date.now();
           setMonitoredTurn({
             threadId: event.threadId ?? currentTurn?.threadId ?? storedThread,
             turnId: event.turnId ?? currentTurn?.turnId ?? null,
-            status: event.label ?? currentTurn?.status ?? "Codex is working…",
+            status: event.label ?? currentTurn?.status ?? `${agentName} is working…`,
             startedAt: currentTurn?.startedAt ?? startedAt,
             lastActivityAt: activityAt,
           });
@@ -1407,6 +1451,8 @@ export function PaperWorkspace() {
           setApplyConfirmationMessage(null);
           setPendingApproval({
             id: event.requestId,
+            provider: event.provider ?? agentProvider,
+            agentName: event.agentName ?? agentName,
             approvalType,
             itemId: event.itemId,
             reason: event.reason,
@@ -1440,13 +1486,13 @@ export function PaperWorkspace() {
               setPendingApproval((current) => (
                 current && String(current.id) === resolvedRequestId ? null : current
               ));
-              setAgentStatus("Research access request closed; Codex is continuing…");
+              setAgentStatus(`Research access request closed; ${agentName} is continuing…`);
             } else {
               const returnContext = reviewReturnContextRef.current;
               void restoreReviewContext(project, returnContext).catch((reason) => {
                 setError(reason instanceof Error ? reason.message : "Could not restore the source after review closed");
               });
-              setAgentStatus("Review request closed; Codex is continuing…");
+              setAgentStatus(`Review request closed; ${agentName} is continuing…`);
             }
           }
         } else if (event.type === "applyCompleted") {
@@ -1463,7 +1509,7 @@ export function PaperWorkspace() {
             }) || applyLifecycleHandled;
           }
         } else if (event.type === "error") {
-          setError(event.message || "Codex encountered an error");
+          setError(event.message || `${agentName} encountered an error`);
         } else if (event.type === "completed") {
           setMonitoredTurn(null);
           const activeApply = activeApplyRef.current;
@@ -1471,8 +1517,8 @@ export function PaperWorkspace() {
             applyLifecycleHandled = true;
             markApplyConfirmationDelayed(
               activeApply.snapshotId
-                ? "The Codex turn completed. Verifying the approved file state before unlocking the source."
-                : "The Codex turn completed without an apply receipt. Keep this review open until local status is confirmed.",
+                ? `The ${agentName} turn completed. Verifying the approved file state before unlocking the source.`
+                : `The ${agentName} turn completed without an apply receipt. Keep this review open until local status is confirmed.`,
             );
             if (activeApply.snapshotId) void checkApplyStatusRef.current(false);
           } else {
@@ -1511,7 +1557,7 @@ export function PaperWorkspace() {
       ));
       if (activeApplyRef.current && !applyLifecycleHandled) {
         markApplyConfirmationDelayed(
-          "The Codex stream ended before apply confirmation arrived. Status checks can still confirm the local change.",
+          `The ${agentName} stream ended before apply confirmation arrived. Status checks can still confirm the local change.`,
         );
       } else if (!applyLifecycleHandled && activePath) {
         await openFileAfterSave(activePath, project);
@@ -1519,11 +1565,11 @@ export function PaperWorkspace() {
     } catch (reason) {
       if (activeApplyRef.current) {
         markApplyConfirmationDelayed(
-          "The Codex stream was interrupted before apply confirmation arrived. Check status before editing the reviewed source.",
+          `The ${agentName} stream was interrupted before apply confirmation arrived. Check status before editing the reviewed source.`,
         );
       }
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
-        setError(reason instanceof Error ? reason.message : "Codex request failed");
+        setError(reason instanceof Error ? reason.message : `${agentName} request failed`);
       }
     } finally {
       streamAbortRef.current = null;
@@ -1581,8 +1627,8 @@ export function PaperWorkspace() {
       });
       if (permissionApproval) {
         const continuingStatus = decision === "accept"
-          ? "Research access allowed; Codex is continuing…"
-          : "Research access declined; Codex is continuing…";
+          ? `Research access allowed; ${agentName} is continuing…`
+          : `Research access declined; ${agentName} is continuing…`;
         setPendingApproval(null);
         setAgentStatus(continuingStatus);
         const monitored = turnMonitorRef.current;
@@ -1601,7 +1647,7 @@ export function PaperWorkspace() {
           startApplyPolling(activeApply);
         } else {
           markApplyConfirmationDelayed(
-            "The local companion did not return an apply receipt. Keep this review open until the Codex stream confirms the change.",
+            `The local companion did not return an apply receipt. Keep this review open until the ${agentName} stream confirms the change.`,
           );
         }
       } else {
@@ -1620,7 +1666,7 @@ export function PaperWorkspace() {
       } else if (decision === "accept") {
         if (approvalTimedOut && activeApplyRef.current === activeApply && activeApply && !activeApply.settled) {
           markApplyConfirmationDelayed(
-            "Approval confirmation timed out. Keep this review open while Codex finishes, then check the local change status.",
+            `Approval confirmation timed out. Keep this review open while ${agentName} finishes, then check the local change status.`,
           );
         } else if (activeApplyRef.current === activeApply && activeApply) {
           activeApply.settled = true;
@@ -1641,7 +1687,7 @@ export function PaperWorkspace() {
     }
   };
 
-  const stopCodexTurn = async () => {
+  const stopAgentTurn = async () => {
     if (
       !project
       || stoppingTurn
@@ -1654,9 +1700,9 @@ export function PaperWorkspace() {
     ) return;
     const monitored = turnMonitorRef.current;
     const stoppingPermissionApproval = pendingApproval?.approvalType === "permission";
-    const storedThread = localStorage.getItem(threadKey(project.researchRoot));
+    const storedThread = localStorage.getItem(threadKey(project.researchRoot, agentProvider));
     setStoppingTurn(true);
-    setAgentStatus("Stopping Codex…");
+    setAgentStatus(`Stopping ${agentName}…`);
     try {
       const result = await api<StopTurnResponse>("/api/agent/stop", {
         method: "POST",
@@ -1665,6 +1711,7 @@ export function PaperWorkspace() {
           paperRoot: project.paperRoot,
           threadId: monitored.threadId ?? storedThread,
           turnId: monitored.turnId,
+          provider: agentProvider,
         }),
       });
       streamAbortRef.current?.abort();
@@ -1682,14 +1729,14 @@ export function PaperWorkspace() {
       } else {
         setMonitoredTurn({
           ...monitored,
-          status: "Stopping Codex…",
+          status: `Stopping ${agentName}…`,
           lastActivityAt: Date.now(),
         });
       }
       void pollAgentStatus(project);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not stop the Codex turn");
-      setAgentStatus(monitored.status || "Codex is working…");
+      setError(reason instanceof Error ? reason.message : `Could not stop the ${agentName} turn`);
+      setAgentStatus(monitored.status || `${agentName} is working…`);
     } finally {
       setStoppingTurn(false);
     }
@@ -1867,12 +1914,36 @@ export function PaperWorkspace() {
           </label>
         ) : null}
 
+        <label className="reasoning-picker" title="Choose which local subscription-backed agent to use">
+          <Bot size={13} />
+          <span>Agent</span>
+          <select
+            value={agentProvider}
+            disabled={agentBusy || Boolean(pendingApproval)}
+            onChange={(event) => {
+              const next = event.target.value as AgentProvider;
+              setAgentProvider(next);
+              localStorage.setItem(AGENT_PROVIDER_KEY, next);
+              setReasoningEffort("");
+              setMessages([]);
+              setLatestDiff("");
+              setAgentStatus("Ready");
+              setError(null);
+            }}
+            aria-label="AI agent provider"
+          >
+            <option value="codex">Codex</option>
+            <option value="claude">Claude Code</option>
+            <option value="cursor">Cursor Agent</option>
+          </select>
+        </label>
+
         {project ? (
           <label
             className="reasoning-picker"
-            title={codexSettings?.displayName
-              ? `Reasoning effort for ${codexSettings.displayName}`
-              : "Codex reasoning effort"}
+            title={agentSettings?.displayName
+              ? `Reasoning effort for ${agentSettings.displayName}`
+              : `${agentName} reasoning effort`}
           >
             <Sparkles size={13} />
             <span>Intelligence</span>
@@ -1881,17 +1952,17 @@ export function PaperWorkspace() {
               onChange={(event) => {
                 const value = event.target.value;
                 setReasoningEffort(value);
-                if (value) localStorage.setItem(effortKey(project.researchRoot), value);
-                else localStorage.removeItem(effortKey(project.researchRoot));
+                if (value) localStorage.setItem(effortKey(project.researchRoot, agentProvider), value);
+                else localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
               }}
-              aria-label="Codex intelligence level"
+              aria-label={`${agentName} intelligence level`}
             >
               <option value="">
-                {codexSettings?.defaultReasoningEffort
-                  ? `Default · ${effortLabel(codexSettings.defaultReasoningEffort)}`
+                {agentSettings?.defaultReasoningEffort
+                  ? `Default · ${effortLabel(agentSettings.defaultReasoningEffort)}`
                   : "Default"}
               </option>
-              {codexSettings?.supportedReasoningEfforts.map((option) => (
+              {agentSettings?.supportedReasoningEfforts.map((option) => (
                 <option key={option.reasoningEffort} value={option.reasoningEffort}>
                   {effortLabel(option.reasoningEffort)}
                 </option>
@@ -1900,8 +1971,8 @@ export function PaperWorkspace() {
           </label>
         ) : null}
 
-        <span className={`connection-pill ${health?.codex?.authenticated ? "connected" : ""}`}>
-          <span /> {health === null ? "Connecting" : health?.codex?.authenticated ? "Codex subscription" : "Codex offline"}
+        <span className={`connection-pill ${providerHealth?.authenticated ? "connected" : ""}`} title={providerHealth?.label}>
+          <span /> {health === null ? "Connecting" : providerHealth?.authenticated ? `${agentName} subscription` : `${agentName} offline`}
         </span>
 
         <button className="button compile-button" onClick={() => compile()} disabled={!mainFile || compiling}>
@@ -2106,7 +2177,7 @@ export function PaperWorkspace() {
               {compiling ? "Building…" : compileErrors.length ? `${compileErrors.length} LaTeX ${compileErrors.length === 1 ? "issue" : "issues"}` : pdfUrl ? "Build is current" : "No build yet"}
               {compileLog ? <ChevronDown size={12} className={logOpen ? "rotated" : ""} /> : null}
             </button>
-            <span>{selection ? `${selection.origin === "pdf" ? "PDF mapped to" : "Selected"} ${selectedLabel}` : "Select source or rendered text to focus Codex"}</span>
+            <span>{selection ? `${selection.origin === "pdf" ? "PDF mapped to" : "Selected"} ${selectedLabel}` : `Select source or rendered text to focus ${agentName}`}</span>
           </footer>
           {logOpen ? <pre className="compile-log">{compileErrors.join("\n") || compileLog}</pre> : null}
         </section>
@@ -2114,7 +2185,7 @@ export function PaperWorkspace() {
         <ResizeHandle
           className="agent-resizer"
           orientation="vertical"
-          label="Resize Codex panel"
+          label={`Resize ${agentName} panel`}
           controls="document-pane codex-pane"
           value={fittedPanes.agentWidth}
           min={AGENT_MIN}
@@ -2138,7 +2209,7 @@ export function PaperWorkspace() {
         <aside id="codex-pane" className="agent-panel">
           <div className="agent-header">
             <div className="agent-avatar"><Sparkles size={17} /></div>
-            <div><span className="eyebrow">Your local agent</span><strong>Codex</strong></div>
+            <div><span className="eyebrow">Your local agent</span><strong>{agentName}</strong></div>
             <span className={`agent-status ${agentBusy || turnActive ? "busy" : ""}`}>{agentStatus}</span>
           </div>
 
@@ -2147,20 +2218,20 @@ export function PaperWorkspace() {
               <div className="turn-monitor-copy">
                 <span className="turn-monitor-title">
                   <LoaderCircle className="spin" size={13} />
-                  {turnTakingLong ? "Taking longer than usual" : turnMonitor.status || "Codex is working…"}
+                  {turnTakingLong ? "Taking longer than usual" : turnMonitor.status || `${agentName} is working…`}
                 </span>
                 <span className="turn-monitor-time">{formatElapsed(turnElapsed)} elapsed</span>
               </div>
               <button
                 type="button"
                 className="turn-stop-button"
-                onClick={() => { void stopCodexTurn(); }}
+                onClick={() => { void stopAgentTurn(); }}
                 disabled={stoppingTurn || approvalBusy || stopLockedForApply || !turnInterruptible}
                 title={!turnInterruptible
-                  ? "Codex is still starting"
+                  ? `${agentName} is still starting`
                   : approvalBusy || stopLockedForApply
                     ? "Wait for the approved change to finish"
-                    : "Stop this Codex turn"}
+                    : `Stop this ${agentName} turn`}
               >
                 {stoppingTurn ? <LoaderCircle className="spin" size={12} /> : <Square size={11} fill="currentColor" />}
                 {stoppingTurn ? "Stopping…" : "Stop"}
@@ -2191,8 +2262,10 @@ export function PaperWorkspace() {
                     <span className="welcome-mark"><MessageSquareText size={20} /></span>
                     <h2>Revise in context.</h2>
                     <p>
-                      Codex can read the paper, equations, figures, references, and the code around them.
-                      Source edits wait for your approval. To rerun code or generate non-paper outputs, Codex may ask for turn-only access to the smallest research-output folder it needs; network access stays off.
+                      {agentName} can read the paper, equations, figures, references, and the code around them.
+                      {agentProvider === "codex"
+                        ? " Source edits wait for your approval. To rerun code or generate non-paper outputs, Codex may ask for turn-only access to the smallest research-output folder it needs; command network access stays off."
+                        : ` ${agentName} runs in proposal-only mode: it cannot write or run commands, and every source edit waits for your approval.`}
                     </p>
                     <div className="suggestion-list">
                       {[
@@ -2200,7 +2273,7 @@ export function PaperWorkspace() {
                         "Check whether this equation is explained clearly",
                         "Make the notation consistent across the paper",
                       ].map((suggestion) => (
-                        <button key={suggestion} onClick={() => sendToCodex(suggestion)} disabled={!project || !selection}>
+                        <button key={suggestion} onClick={() => sendToAgent(suggestion)} disabled={!project || !selection}>
                           <Sparkles size={12} /> {suggestion}
                         </button>
                       ))}
@@ -2232,18 +2305,18 @@ export function PaperWorkspace() {
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
-                        sendToCodex();
+                        sendToAgent();
                       }
                     }}
-                    placeholder={project ? "Ask Codex to revise, check, or explain…" : "Open a paper to begin…"}
+                    placeholder={project ? `Ask ${agentName} to revise, check, or explain…` : "Open a paper to begin…"}
                     disabled={!project || agentBusy}
                     rows={3}
                   />
                   <button
                     className="send-button"
-                    onClick={() => sendToCodex()}
+                    onClick={() => sendToAgent()}
                     disabled={!prompt.trim() || !project || agentBusy}
-                    aria-label="Send to Codex"
+                    aria-label={`Send to ${agentName}`}
                   >
                     {agentBusy ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={16} />}
                   </button>
@@ -2251,7 +2324,7 @@ export function PaperWorkspace() {
                 <p className="composer-note">
                   {selection
                     ? "Selection is the primary target · related paper edits are allowed when needed"
-                    : "Uses your Codex subscription · no API key"}
+                    : `Uses your ${AGENT_SUBSCRIPTIONS[agentProvider]} subscription · no API key`}
                 </p>
               </div>
             </>
@@ -2263,17 +2336,17 @@ export function PaperWorkspace() {
         <div className="onboarding-overlay">
           <section className="onboarding-card">
             <span className="onboarding-kicker">Local-first scientific writing</span>
-            <h1>Your paper, its source, and Codex—in one view.</h1>
+            <h1>Your paper, its source, and your chosen agent—in one view.</h1>
             <p>Choose the research folder that holds your code and data, then the paper folder inside it. The workbench keeps both in context while edits remain yours to approve.</p>
             <button className="button primary onboarding-button" onClick={chooseWorkspace}>
               <FolderOpen size={16} /> Choose research workspace
             </button>
             <div className="onboarding-points">
-              <span><Check size={13} /> Existing Codex sign-in</span>
+              <span><Check size={13} /> Codex, Claude Code, or Cursor sign-in</span>
               <span><Check size={13} /> Local LaTeX toolchain</span>
               <span><Check size={13} /> Diff, approve, undo</span>
             </div>
-            {health && !health.ok ? <small className="companion-warning">Start the local companion to enable folders, LaTeX, and Codex.</small> : null}
+            {health && !health.ok ? <small className="companion-warning">Start the local companion and sign in to one supported agent to enable the full workspace.</small> : null}
           </section>
         </div>
       ) : null}
