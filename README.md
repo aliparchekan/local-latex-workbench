@@ -1,5 +1,8 @@
 # Local LaTeX Workbench
 
+[![CI](https://github.com/aliparchekan/local-latex-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/aliparchekan/local-latex-workbench/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+
 Local LaTeX Workbench is an independent, local-first workspace for revising LaTeX papers with source, rendered PDF, and a Codex conversation side by side. It connects to a locally installed Codex app-server and uses the user's existing ChatGPT/Codex sign-in; it does not configure an OpenAI API key or use the OpenAI SDK.
 
 > [!IMPORTANT]
@@ -32,6 +35,8 @@ The current native folder picker and Finder integration require macOS. Other par
 ## Run locally
 
 ```bash
+git clone https://github.com/aliparchekan/local-latex-workbench.git
+cd local-latex-workbench
 npm install
 npm run dev
 ```
@@ -79,8 +84,12 @@ npm start         # run the built frontend and local companion
 - Before opening an untrusted repository, inspect its instructions and scripts. An approved command-output folder permits changes anywhere underneath it for that turn.
 - Report suspected vulnerabilities through a private GitHub security advisory rather than a public issue.
 
-See [SECURITY.md](SECURITY.md) for the disclosure policy and [NOTICE.md](NOTICE.md) for naming, affiliation, and third-party notices.
+See [SECURITY.md](SECURITY.md) for the disclosure policy and [NOTICE](NOTICE) for naming, affiliation, and third-party notices.
+
+## Contributing
+
+Community contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), open an issue for substantial changes, and submit code through a pull request. Every pull request runs the same build, type, lint, and test checks used for releases.
 
 ## License
 
-Copyright © 2026 Ali Parchekani. All rights reserved. The repository is public for inspection and evaluation, but no open-source license is granted at this time. Third-party dependencies remain subject to their own licenses. See [LICENSE](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE). You may use, modify, and distribute the project under that license, including its notice and attribution requirements. Third-party dependencies remain subject to their own licenses.

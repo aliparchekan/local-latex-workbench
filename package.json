@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "A local-first LaTeX workspace with side-by-side source, PDF, and reviewable Codex edits.",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "author": "Ali Parchekani",
   "repository": {
     "type": "git",
