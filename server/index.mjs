@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -331,12 +332,79 @@ function runProcess(command, args, options = {}) {
   });
 }
 
+function subscriptionEnvironment(source = process.env) {
+  const env = { ...source };
+  delete env.OPENAI_API_KEY;
+  delete env.AZURE_OPENAI_API_KEY;
+  delete env.CODEX_API_KEY;
+  return env;
+}
+
+function versionParts(version) {
+  return String(version ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function compareVersions(left, right) {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+let codexRuntimePromise = null;
+async function getCodexRuntime() {
+  if (codexRuntimePromise) return codexRuntimePromise;
+  codexRuntimePromise = (async () => {
+    const override = process.env.LOCAL_LATEX_CODEX_BIN?.trim();
+    const candidates = override
+      ? [override]
+      : [
+        ...(process.platform === "darwin" ? [
+          "/Applications/ChatGPT.app/Contents/Resources/codex",
+          path.join(homedir(), "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
+        ] : []),
+        "codex",
+      ];
+    const uniqueCandidates = [...new Set(candidates)];
+    const probes = await Promise.all(uniqueCandidates.map(async (command, priority) => {
+      const result = await runProcess(command, ["--version"], {
+        env: subscriptionEnvironment(),
+        timeoutMs: 8_000,
+        maxOutputBytes: 16_384,
+      });
+      const version = `${result.stdout}\n${result.stderr}`.match(/codex-cli\s+([^\s]+)/i)?.[1] ?? null;
+      return { command, version, result, priority };
+    }));
+    const available = probes.filter((probe) => probe.result.code === 0);
+    if (!available.length) {
+      return probes[0] ?? {
+        command: override || "codex",
+        version: null,
+        result: { code: null, stdout: "", stderr: "Codex CLI not found." },
+        priority: 0,
+      };
+    }
+    available.sort((left, right) => (
+      compareVersions(right.version, left.version) || left.priority - right.priority
+    ));
+    return available[0];
+  })();
+  return codexRuntimePromise;
+}
+
 let healthCache = null;
 async function getHealth() {
   if (healthCache && Date.now() - healthCache.at < 5_000) return healthCache.value;
-  const [version, login, claudeVersionResult, claudeLogin, cursorVersionResult, cursorLogin, latexmk, synctex] = await Promise.all([
-    runProcess("codex", ["--version"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
-    runProcess("codex", ["login", "status"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
+  const codexRuntime = await getCodexRuntime();
+  const [login, claudeVersionResult, claudeLogin, cursorVersionResult, cursorLogin, latexmk, synctex] = await Promise.all([
+    runProcess(codexRuntime.command, ["login", "status"], {
+      env: subscriptionEnvironment(),
+      timeoutMs: 8_000,
+      maxOutputBytes: 16_384,
+    }),
     runProcess("claude", ["--version"], {
       env: providerEnvironment("claude"),
       timeoutMs: 8_000,
@@ -361,9 +429,9 @@ async function getHealth() {
     runProcess("synctex", ["help"], { timeoutMs: 8_000, maxOutputBytes: 16_384 }),
   ]);
 
-  const codexInstalled = version.code === 0;
+  const codexInstalled = codexRuntime.result.code === 0;
   const codexAuthenticated = login.code === 0 && /logged in using chatgpt/i.test(`${login.stdout}\n${login.stderr}`);
-  const codexVersion = `${version.stdout}\n${version.stderr}`.match(/codex-cli\s+([^\s]+)/i)?.[1] ?? null;
+  const codexVersion = codexRuntime.version;
   const claudeInstalled = claudeVersionResult.code === 0;
   let claudeAuthenticated = false;
   try {
@@ -1124,19 +1192,22 @@ class CodexAppServerClient {
   }
 
   async ensureReady() {
-    if (this.child && this.readyPromise) return this.readyPromise;
-    this.readyPromise = this.#start();
-    return this.readyPromise;
+    if (this.readyPromise) return this.readyPromise;
+    const ready = this.#start();
+    this.readyPromise = ready;
+    ready.catch(() => {
+      if (this.readyPromise === ready) this.readyPromise = null;
+    });
+    return ready;
   }
 
   async #start() {
-    const env = { ...process.env };
-    // The companion intentionally uses the user's existing ChatGPT login only.
-    delete env.OPENAI_API_KEY;
-    delete env.AZURE_OPENAI_API_KEY;
-    delete env.CODEX_API_KEY;
-    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
-      env,
+    // Prefer the newest locally installed Codex runtime, including the one
+    // bundled with the ChatGPT desktop app, while retaining an explicit
+    // override for community installations.
+    const runtime = await getCodexRuntime();
+    const child = spawn(runtime.command, ["app-server", "--listen", "stdio://"], {
+      env: subscriptionEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
@@ -1296,8 +1367,21 @@ async function getCodexModelCatalog() {
   ) {
     return codexModelCache.models;
   }
-  const response = await codexClient.request("model/list", { limit: 100, includeHidden: true });
-  const models = Array.isArray(response.data) ? response.data : [];
+  const models = [];
+  const seenCursors = new Set();
+  let cursor = null;
+  do {
+    const params = { limit: 100, includeHidden: true };
+    if (cursor) params.cursor = cursor;
+    const response = await codexClient.request("model/list", params);
+    if (Array.isArray(response.data)) models.push(...response.data);
+    const nextCursor = typeof response.nextCursor === "string" && response.nextCursor
+      ? response.nextCursor
+      : null;
+    if (!nextCursor || seenCursors.has(nextCursor)) break;
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (models.length < 1_000);
   codexModelCache = { at: Date.now(), generation: codexClient.generation, models };
   return models;
 }
@@ -1307,6 +1391,7 @@ function publicModelSettings(model) {
   return {
     model: model.model ?? model.id,
     displayName: model.displayName ?? model.model ?? model.id,
+    description: model.description ?? "",
     defaultReasoningEffort: model.defaultReasoningEffort ?? null,
     supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts)
       ? model.supportedReasoningEfforts.map((option) => ({
@@ -1314,7 +1399,182 @@ function publicModelSettings(model) {
         description: option.description ?? "",
       }))
       : [],
+    isDefault: Boolean(model.isDefault),
   };
+}
+
+function codexModelSettingsFromCatalog(models, configuredModel, configuredEffort = null) {
+  const model = models.find((entry) => entry.model === configuredModel || entry.id === configuredModel)
+    ?? models.find((entry) => entry.isDefault && !entry.hidden)
+    ?? models.find((entry) => !entry.hidden)
+    ?? models[0]
+    ?? null;
+  const settings = publicModelSettings(model) ?? {
+    model: configuredModel,
+    displayName: configuredModel,
+    description: "",
+    defaultReasoningEffort: null,
+    supportedReasoningEfforts: [],
+    isDefault: false,
+  };
+  if (configuredEffort) settings.defaultReasoningEffort = configuredEffort;
+  return {
+    ...settings,
+    models: models
+      .filter((entry) => !entry.hidden)
+      .map(publicModelSettings)
+      .filter(Boolean),
+  };
+}
+
+function resolveCodexModel(models, requestedModel) {
+  const model = models.find((entry) => (
+    !entry.hidden
+    && (entry.model === requestedModel || entry.id === requestedModel)
+  ));
+  if (!model) {
+    throw new HttpError(
+      400,
+      "That Codex model is not available to the signed-in subscription. Refresh the model list and choose another model.",
+      "model_unavailable",
+    );
+  }
+  return model.model ?? model.id;
+}
+
+let claudeModelCache = null;
+
+function requestClaudeModelCatalog(researchRoot) {
+  return new Promise((resolve, reject) => {
+    const requestId = randomUUID();
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--input-format",
+      "stream-json",
+      "--permission-mode",
+      "plan",
+      "--setting-sources",
+      "",
+      "--safe-mode",
+      "--no-chrome",
+    ];
+    let child;
+    try {
+      child = spawn("claude", args, {
+        cwd: researchRoot,
+        env: providerEnvironment("claude"),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let settled = false;
+    let stderr = "";
+    const lines = readline.createInterface({ input: child.stdout });
+    const timer = setTimeout(() => finish(new Error("Claude Code model discovery timed out.")), 15_000);
+    timer.unref();
+
+    const finish = (error, models = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
+      if (!child.killed) child.kill("SIGTERM");
+      if (error) reject(error);
+      else resolve(models);
+    };
+
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-16_384);
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (!settled) {
+        finish(new Error(stderr.trim() || `Claude Code model discovery exited (${code ?? "unknown"}).`));
+      }
+    });
+    lines.on("line", (line) => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (
+        message.type !== "control_response"
+        || message.response?.request_id !== requestId
+      ) return;
+      if (message.response.subtype !== "success") {
+        finish(new Error(message.response.error || "Claude Code could not return its model catalog."));
+        return;
+      }
+      const models = message.response.response?.models;
+      if (!Array.isArray(models)) {
+        finish(new Error("Claude Code returned an invalid model catalog."));
+        return;
+      }
+      finish(null, models);
+    });
+    child.stdin.end(`${JSON.stringify({
+      type: "control_request",
+      request_id: requestId,
+      request: { subtype: "initialize" },
+    })}\n`);
+  });
+}
+
+async function getClaudeModelCatalog(researchRoot) {
+  if (
+    claudeModelCache
+    && claudeModelCache.researchRoot === researchRoot
+    && Date.now() - claudeModelCache.at < 60_000
+  ) return claudeModelCache.models;
+  const models = await requestClaudeModelCatalog(researchRoot);
+  claudeModelCache = { at: Date.now(), researchRoot, models };
+  return models;
+}
+
+function claudeModelSettingsFromCatalog(models) {
+  const publicModels = models
+    .filter((entry) => typeof entry?.value === "string" && entry.value)
+    .map((entry, index) => ({
+      model: entry.value,
+      displayName: entry.displayName ?? entry.value,
+      description: entry.description ?? "",
+      defaultReasoningEffort: null,
+      supportedReasoningEfforts: Array.isArray(entry.supportedEffortLevels)
+        ? entry.supportedEffortLevels.map((reasoningEffort) => ({
+          reasoningEffort,
+          description: `${reasoningEffort} Claude Code effort`,
+        }))
+        : [],
+      isDefault: index === 0,
+    }));
+  const selected = publicModels[0] ?? null;
+  return {
+    model: selected?.model ?? null,
+    displayName: selected?.displayName ?? "Claude Code subscription model",
+    description: selected?.description ?? "Claude Code did not advertise any selectable models.",
+    defaultReasoningEffort: selected?.defaultReasoningEffort ?? null,
+    supportedReasoningEfforts: selected?.supportedReasoningEfforts ?? [],
+    models: publicModels,
+  };
+}
+
+function resolveClaudeModel(models, requestedModel) {
+  const model = models.find((entry) => entry?.value === requestedModel);
+  if (!model) {
+    throw new HttpError(
+      400,
+      "That Claude Code model is not in the signed-in CLI's current model picker. Refresh the model list and choose another model.",
+      "model_unavailable",
+    );
+  }
+  return model.value;
 }
 
 async function codexSettingsForProject(researchRoot) {
@@ -1323,42 +1583,46 @@ async function codexSettingsForProject(researchRoot) {
     codexClient.request("config/read", { cwd: researchRoot, includeLayers: false }),
   ]);
   const configuredModel = configResponse.config?.model ?? null;
-  const model = models.find((entry) => entry.model === configuredModel || entry.id === configuredModel)
-    ?? models.find((entry) => entry.isDefault)
-    ?? models.find((entry) => !entry.hidden)
-    ?? models[0]
-    ?? null;
-  const settings = publicModelSettings(model) ?? {
-    model: configuredModel,
-    displayName: configuredModel,
-    defaultReasoningEffort: null,
-    supportedReasoningEfforts: [],
-  };
-  if (configResponse.config?.model_reasoning_effort) {
-    settings.defaultReasoningEffort = configResponse.config.model_reasoning_effort;
-  }
-  return settings;
+  return codexModelSettingsFromCatalog(
+    models,
+    configuredModel,
+    configResponse.config?.model_reasoning_effort ?? null,
+  );
 }
 
 async function agentSettingsForProject(provider, researchRoot) {
   if (provider === "codex") return codexSettingsForProject(researchRoot);
   if (provider === "claude") {
-    return {
-      model: null,
-      displayName: "Claude Code subscription model",
-      defaultReasoningEffort: null,
-      supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({
-        reasoningEffort,
-        description: `${reasoningEffort} Claude Code effort`,
-      })),
-    };
+    return claudeModelSettingsFromCatalog(await getClaudeModelCatalog(researchRoot));
   }
   return {
     model: null,
     displayName: "Cursor subscription model",
+    description: "Uses the model selected by Cursor for this subscription.",
     defaultReasoningEffort: null,
     supportedReasoningEfforts: [],
+    models: [],
   };
+}
+
+async function validateCodexModel(modelName) {
+  if (!modelName) return null;
+  return resolveCodexModel(await getCodexModelCatalog(), modelName);
+}
+
+async function validateClaudeModel(modelName, researchRoot) {
+  if (!modelName) return null;
+  return resolveClaudeModel(await getClaudeModelCatalog(researchRoot), modelName);
+}
+
+async function validateClaudeReasoningEffort(modelName, researchRoot, effort) {
+  if (!effort) return;
+  const models = await getClaudeModelCatalog(researchRoot);
+  const model = models.find((entry) => entry?.value === modelName) ?? models[0];
+  const supported = Array.isArray(model?.supportedEffortLevels) ? model.supportedEffortLevels : [];
+  if (supported.length && !supported.includes(effort)) {
+    throw new HttpError(400, `The selected intelligence level is not available for ${model.displayName ?? modelName}.`);
+  }
 }
 
 async function validateReasoningEffort(modelName, effort) {
@@ -2886,11 +3150,8 @@ async function proposalChangesForReview(session, proposal) {
   return changes;
 }
 
-async function streamExternalAgentTurn(res, body, provider, roots, prompt, requestedEffort) {
+async function streamExternalAgentTurn(res, body, provider, roots, prompt, requestedEffort, requestedModel) {
   const name = providerName(provider);
-  if (provider === "claude" && requestedEffort && !["low", "medium", "high"].includes(requestedEffort)) {
-    throw new HttpError(400, "Claude Code effort must be low, medium, or high.");
-  }
   const requestedThreadId = body.threadId == null || body.threadId === ""
     ? null
     : assertString(body.threadId, "threadId", { maxLength: 256 });
@@ -2930,6 +3191,7 @@ async function streamExternalAgentTurn(res, body, provider, roots, prompt, reque
       userPrompt: prompt,
       threadId: requestedThreadId,
       sessionId: provider === "claude" && !requestedThreadId ? provisionalRawId : null,
+      model: provider === "claude" ? requestedModel : null,
       reasoningEffort: provider === "claude" ? requestedEffort : null,
     });
     const result = await runExternalProvider(provider, invocation, session, turnId);
@@ -3067,6 +3329,17 @@ async function streamAgentTurn(res, body) {
   const requestedEffort = body.reasoningEffort == null || body.reasoningEffort === ""
     ? null
     : assertString(body.reasoningEffort, "reasoningEffort", { maxLength: 64 });
+  const modelValue = body.model == null || body.model === ""
+    ? null
+    : assertString(body.model, "model", { maxLength: 256 });
+  let requestedModel = null;
+  if (provider === "codex") requestedModel = await validateCodexModel(modelValue);
+  else if (provider === "claude") {
+    requestedModel = await validateClaudeModel(modelValue, researchRoot);
+    await validateClaudeReasoningEffort(requestedModel, researchRoot, requestedEffort);
+  } else if (modelValue) {
+    throw new HttpError(400, "Cursor Agent does not expose a subscription model catalog to this workbench.");
+  }
   res.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Transfer-Encoding": "chunked",
@@ -3082,6 +3355,7 @@ async function streamAgentTurn(res, body) {
       { researchRoot, paperRoot },
       prompt,
       requestedEffort,
+      requestedModel,
     );
     return;
   }
@@ -3092,7 +3366,7 @@ async function streamAgentTurn(res, body) {
     writeNdjson(res, {
       type: "thread",
       threadId: session.threadId,
-      model: session.model,
+      model: requestedModel ?? session.model,
       reasoningEffort: requestedEffort ?? session.reasoningEffort,
     });
     writeNdjson(res, { type: "status", label: body.threadId ? "Resuming the paper conversation…" : "Starting a paper conversation…" });
@@ -3100,7 +3374,7 @@ async function streamAgentTurn(res, body) {
     agentSinks.add(sink);
     res.once("close", () => agentSinks.delete(sink));
 
-    if (requestedEffort) await validateReasoningEffort(session.model, requestedEffort);
+    if (requestedEffort) await validateReasoningEffort(requestedModel ?? session.model, requestedEffort);
     const turnParams = {
       threadId: session.threadId,
       cwd: researchRoot,
@@ -3110,10 +3384,13 @@ async function streamAgentTurn(res, body) {
       sandboxPolicy: { type: "readOnly", networkAccess: false },
       input: [{ type: "text", text: prompt, text_elements: [] }],
     };
+    if (requestedModel) turnParams.model = requestedModel;
     if (requestedEffort) turnParams.effort = requestedEffort;
     const response = await codexClient.request("turn/start", turnParams);
     const turnId = response.turn?.id;
     if (!turnId) throw new Error("Codex did not return a turn id.");
+    if (requestedModel) session.model = requestedModel;
+    if (requestedEffort) session.reasoningEffort = requestedEffort;
     const active = registerActiveTurn(session, response.turn);
     sink.turnId = turnId;
     writeNdjson(res, {
@@ -3329,6 +3606,8 @@ export {
   agentSessions,
   agentTurnStatus,
   changeStatus,
+  claudeModelSettingsFromCatalog,
+  codexModelSettingsFromCatalog,
   createUndoSnapshot,
   decideApproval,
   finalizeUndoSnapshot,
@@ -3340,6 +3619,8 @@ export {
   publicPendingApproval,
   publicSnapshotStatus,
   readTextFile,
+  resolveClaudeModel,
+  resolveCodexModel,
   safeApprovalPath,
   saveTextFile,
   stopAgentTurn,

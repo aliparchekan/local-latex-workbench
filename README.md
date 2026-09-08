@@ -18,7 +18,8 @@ Local LaTeX Workbench is an independent, local-first workspace for revising LaTe
 - Keeps the agent conversation pinned to its newest message while a response streams.
 - Maps source selections to the rendered PDF and PDF text selections back to approximate source lines.
 - Sends the exact selected LaTeX range as the primary target while allowing related edits when needed.
-- Exposes supported reasoning-effort levels for Codex and Claude Code.
+- Lists the Codex and Claude Code models currently advertised by each local signed-in subscription and lets you choose one per research workspace.
+- Updates the available intelligence levels from the selected model's live provider metadata.
 - Lets you resize the file, source, PDF, and agent panes; the layout is saved in browser storage.
 - Shows proposed text-file changes in full source before approval and supports conflict-aware undo for the last accepted patch.
 - Recovers active turns and pending reviews after missed events or page reloads, with elapsed-time feedback and a Stop control.
@@ -47,6 +48,8 @@ npm run dev
 Open `http://localhost:3210`. The trusted companion listens only on `127.0.0.1:4317` and handles folder selection, file access, LaTeX, SyncTeX, and the selected agent subprocess.
 
 Choose the signed-in agent from the **Agent** menu. If it is offline, run its login command above and refresh the workbench. The adapters remove `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `CURSOR_API_KEY` from their child-process environments so this workflow uses local subscription authentication rather than silently falling back to an API key.
+
+For Codex and Claude Code, the **Model** menu is populated from the local provider CLI rather than a hardcoded list. Codex uses the newest locally available runtime, including a newer runtime bundled with the ChatGPT desktop app on macOS, and reads its app-server catalog. Claude Code reads the model-picker catalog returned by its subscription-backed initialization protocol. Choices are saved per provider and research workspace, and the **Intelligence** menu follows the levels advertised for the selected model. Set `LOCAL_LATEX_CODEX_BIN` to an explicit Codex executable if you need to override automatic runtime selection.
 
 ## Agent choices
 

@@ -9,6 +9,7 @@ import {
   ChevronDown,
   CircleAlert,
   Copy,
+  Cpu,
   FileCode2,
   FolderOpen,
   GitCompareArrows,
@@ -180,11 +181,22 @@ type ReasoningOption = {
   description: string;
 };
 
+type AgentModelOption = {
+  model: string;
+  displayName: string;
+  description: string;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: ReasoningOption[];
+  isDefault: boolean;
+};
+
 type AgentSettings = {
   model: string | null;
   displayName: string | null;
+  description: string;
   defaultReasoningEffort: string | null;
   supportedReasoningEfforts: ReasoningOption[];
+  models?: AgentModelOption[];
 };
 
 const LAST_PROJECT_KEY = "lattice:last-project";
@@ -205,6 +217,9 @@ const threadKey = (root: string, provider: AgentProvider) => provider === "codex
 const effortKey = (root: string, provider: AgentProvider) => provider === "codex"
   ? `lattice:reasoning-effort:${root}`
   : `lattice:reasoning-effort:${provider}:${root}`;
+const modelKey = (root: string, provider: AgentProvider) => provider === "codex"
+  ? `lattice:codex-model:${root}`
+  : `lattice:model:${provider}:${root}`;
 const PANE_LAYOUT_KEY = "lattice:pane-layout:v1";
 const DEFAULT_PANES = { explorerWidth: 224, agentWidth: 370, sourceRatio: 0.42 };
 const EXPLORER_MIN = 160;
@@ -340,6 +355,21 @@ function effortLabel(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function modelOptionLabel(model: AgentModelOption) {
+  const displayName = model.displayName || model.model;
+  const resolvedDefault = model.model.toLowerCase() === "default"
+    ? model.description.split(/\s+·\s+/, 1)[0]?.trim()
+    : "";
+  const resolution = resolvedDefault
+    && !displayName.toLowerCase().includes(resolvedDefault.toLowerCase())
+    ? ` · ${resolvedDefault}`
+    : "";
+  const recommendation = model.isDefault && !/recommended/i.test(displayName)
+    ? " · recommended"
+    : "";
+  return `${displayName}${resolution}${recommendation}`;
+}
+
 function sourceSlice(content: string, startLine: number, endLine: number) {
   return content.split("\n").slice(Math.max(0, startLine - 1), endLine).join("\n");
 }
@@ -405,6 +435,7 @@ export function PaperWorkspace() {
   const [turnClock, setTurnClock] = useState(() => Date.now());
   const [stoppingTurn, setStoppingTurn] = useState(false);
   const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
   const [latestDiff, setLatestDiff] = useState("");
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -425,6 +456,8 @@ export function PaperWorkspace() {
   const [activeResize, setActiveResize] = useState<"columns" | "rows" | null>(null);
   const agentName = AGENT_NAMES[agentProvider];
   const providerHealth = health?.providers?.[agentProvider] ?? health?.[agentProvider];
+  const selectedModelSettings = agentSettings?.models?.find((model) => model.model === selectedModel) ?? null;
+  const intelligenceSettings = selectedModelSettings ?? agentSettings;
   const projectRef = useRef<ProjectInfo | null>(null);
   const activePathRef = useRef<string | null>(null);
   const contentRef = useRef("");
@@ -1158,14 +1191,35 @@ export function PaperWorkspace() {
       .then((settings) => {
         if (!active) return;
         setAgentSettings(settings);
-        const stored = localStorage.getItem(effortKey(project.researchRoot, agentProvider)) ?? "";
-        const supported = settings.supportedReasoningEfforts.some(
-          (option) => option.reasoningEffort === stored,
+        const availableModels = settings.models ?? [];
+        const storedModel = availableModels.length
+          ? localStorage.getItem(modelKey(project.researchRoot, agentProvider)) ?? ""
+          : "";
+        const nextModel = availableModels.length
+          ? availableModels.find((model) => model.model === storedModel)?.model
+            ?? availableModels.find((model) => model.model === settings.model)?.model
+            ?? availableModels[0]?.model
+            ?? ""
+          : "";
+        setSelectedModel(nextModel);
+        if (storedModel && storedModel !== nextModel) {
+          localStorage.removeItem(modelKey(project.researchRoot, agentProvider));
+        }
+        const effortSettings = availableModels.find((model) => model.model === nextModel) ?? settings;
+        const storedEffort = localStorage.getItem(effortKey(project.researchRoot, agentProvider)) ?? "";
+        const supported = effortSettings.supportedReasoningEfforts.some(
+          (option) => option.reasoningEffort === storedEffort,
         );
-        setReasoningEffort(supported ? stored : "");
+        setReasoningEffort(supported ? storedEffort : "");
+        if (storedEffort && !supported) {
+          localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
+        }
       })
       .catch(() => {
-        if (active) setAgentSettings(null);
+        if (active) {
+          setAgentSettings(null);
+          setSelectedModel("");
+        }
       });
     return () => { active = false; };
   }, [agentProvider, project]);
@@ -1404,6 +1458,7 @@ export function PaperWorkspace() {
           activePath,
           threadId: storedThread,
           provider: agentProvider,
+          model: agentProvider === "cursor" ? null : selectedModel,
           reasoningEffort,
           prompt: message,
           selection,
@@ -1924,6 +1979,8 @@ export function PaperWorkspace() {
               const next = event.target.value as AgentProvider;
               setAgentProvider(next);
               localStorage.setItem(AGENT_PROVIDER_KEY, next);
+              setAgentSettings(null);
+              setSelectedModel("");
               setReasoningEffort("");
               setMessages([]);
               setLatestDiff("");
@@ -1938,17 +1995,57 @@ export function PaperWorkspace() {
           </select>
         </label>
 
+        {project && agentProvider !== "cursor" ? (
+          <label
+            className="reasoning-picker"
+            title={selectedModelSettings?.description || `Choose a model advertised by your signed-in ${agentName} subscription`}
+          >
+            <Cpu size={13} />
+            <span>Model</span>
+            <select
+              value={selectedModel}
+              disabled={agentBusy || Boolean(pendingApproval) || !agentSettings?.models?.length}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedModel(value);
+                if (value) localStorage.setItem(modelKey(project.researchRoot, agentProvider), value);
+                else localStorage.removeItem(modelKey(project.researchRoot, agentProvider));
+                const nextSettings = agentSettings?.models?.find((model) => model.model === value);
+                if (
+                  reasoningEffort
+                  && !nextSettings?.supportedReasoningEfforts.some(
+                    (option) => option.reasoningEffort === reasoningEffort,
+                  )
+                ) {
+                  setReasoningEffort("");
+                  localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
+                }
+              }}
+              aria-label={`${agentName} model`}
+            >
+              {agentSettings?.models?.length ? agentSettings.models.map((model) => (
+                <option key={model.model} value={model.model}>
+                  {modelOptionLabel(model)}
+                </option>
+              )) : (
+                <option value="">Models unavailable</option>
+              )}
+            </select>
+          </label>
+        ) : null}
+
         {project ? (
           <label
             className="reasoning-picker"
-            title={agentSettings?.displayName
-              ? `Reasoning effort for ${agentSettings.displayName}`
+            title={intelligenceSettings?.displayName
+              ? `Reasoning effort for ${intelligenceSettings.displayName}`
               : `${agentName} reasoning effort`}
           >
             <Sparkles size={13} />
             <span>Intelligence</span>
             <select
               value={reasoningEffort}
+              disabled={agentBusy || Boolean(pendingApproval)}
               onChange={(event) => {
                 const value = event.target.value;
                 setReasoningEffort(value);
@@ -1958,11 +2055,11 @@ export function PaperWorkspace() {
               aria-label={`${agentName} intelligence level`}
             >
               <option value="">
-                {agentSettings?.defaultReasoningEffort
-                  ? `Default · ${effortLabel(agentSettings.defaultReasoningEffort)}`
+                {intelligenceSettings?.defaultReasoningEffort
+                  ? `Default · ${effortLabel(intelligenceSettings.defaultReasoningEffort)}`
                   : "Default"}
               </option>
-              {agentSettings?.supportedReasoningEfforts.map((option) => (
+              {intelligenceSettings?.supportedReasoningEfforts.map((option) => (
                 <option key={option.reasoningEffort} value={option.reasoningEffort}>
                   {effortLabel(option.reasoningEffort)}
                 </option>

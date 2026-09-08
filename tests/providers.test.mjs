@@ -19,6 +19,7 @@ test("builds a subscription-only read/search Claude Code invocation", () => {
   const invocation = providerInvocation("claude", {
     ...options,
     sessionId: "550e8400-e29b-41d4-a716-446655440000",
+    model: "subscription-model",
     reasoningEffort: "high",
   });
   assert.equal(invocation.command, "claude");
@@ -32,6 +33,10 @@ test("builds a subscription-only read/search Claude Code invocation", () => {
   assert.ok(!invocation.args.includes("Write"));
   assert.ok(!invocation.args.includes(options.userPrompt));
   assert.match(invocation.prompt, /Tighten the selected paragraph/);
+  assert.deepEqual(
+    invocation.args.slice(invocation.args.indexOf("--model"), invocation.args.indexOf("--model") + 2),
+    ["--model", "subscription-model"],
+  );
   assert.deepEqual(
     invocation.args.slice(invocation.args.indexOf("--effort"), invocation.args.indexOf("--effort") + 2),
     ["--effort", "high"],
