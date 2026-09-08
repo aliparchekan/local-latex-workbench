@@ -119,6 +119,7 @@ export function providerInvocation(provider, options) {
     ];
     if (rawThread) args.push("--resume", rawThread);
     else if (options.sessionId) args.push("--session-id", options.sessionId);
+    if (options.model) args.push("--model", options.model);
     if (options.reasoningEffort) args.push("--effort", options.reasoningEffort);
     return { command: "claude", args, prompt, output: "claude-json" };
   }

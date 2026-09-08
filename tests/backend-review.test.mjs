@@ -11,6 +11,8 @@ import {
   agentSessions,
   agentTurnStatus,
   changeStatus,
+  claudeModelSettingsFromCatalog,
+  codexModelSettingsFromCatalog,
   createUndoSnapshot,
   decideApproval,
   finalizeUndoSnapshot,
@@ -20,12 +22,95 @@ import {
   preparePermissionGrant,
   proposalChangesForReview,
   readTextFile,
+  resolveClaudeModel,
+  resolveCodexModel,
   saveTextFile,
   stopAgentTurn,
   undoChanges,
 } from "../server/index.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+test("exposes every visible subscription model and rejects unavailable selections", () => {
+  const models = [
+    {
+      id: "catalog-default",
+      model: "catalog-default",
+      displayName: "Catalog Default",
+      description: "Reliable agentic workhorse.",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low", description: "Fast" },
+        { reasoningEffort: "high", description: "Deep" },
+      ],
+      isDefault: true,
+      hidden: false,
+    },
+    {
+      id: "catalog-specialist",
+      model: "catalog-specialist",
+      displayName: "Catalog Specialist",
+      description: "Most capable.",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [{ reasoningEffort: "ultra", description: "Maximum" }],
+      isDefault: false,
+      hidden: false,
+    },
+    {
+      id: "retired-model",
+      model: "retired-model",
+      displayName: "Retired",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: [],
+      isDefault: false,
+      hidden: true,
+    },
+  ];
+
+  const settings = codexModelSettingsFromCatalog(models, "catalog-default", "high");
+  assert.equal(settings.model, "catalog-default");
+  assert.equal(settings.defaultReasoningEffort, "high");
+  assert.deepEqual(settings.models.map((model) => model.model), ["catalog-default", "catalog-specialist"]);
+  assert.equal(resolveCodexModel(models, "catalog-specialist"), "catalog-specialist");
+  assert.throws(
+    () => resolveCodexModel(models, "retired-model"),
+    (error) => error.status === 400 && error.code === "model_unavailable",
+  );
+  assert.throws(
+    () => resolveCodexModel(models, "not-on-this-subscription"),
+    (error) => error.status === 400 && error.code === "model_unavailable",
+  );
+});
+
+test("maps Claude Code's live picker models and effort levels without a built-in catalog", () => {
+  const models = [
+    {
+      value: "provider-default",
+      displayName: "Subscription default",
+      description: "Chosen by the signed-in account.",
+      supportedEffortLevels: ["low", "high", "max"],
+    },
+    {
+      value: "provider-specialist",
+      displayName: "Specialist",
+      description: "A second account model.",
+      supportedEffortLevels: ["medium", "high"],
+    },
+  ];
+
+  const settings = claudeModelSettingsFromCatalog(models);
+  assert.equal(settings.model, "provider-default");
+  assert.deepEqual(settings.models.map((model) => model.model), ["provider-default", "provider-specialist"]);
+  assert.deepEqual(
+    settings.models[0].supportedReasoningEfforts.map((option) => option.reasoningEffort),
+    ["low", "high", "max"],
+  );
+  assert.equal(resolveClaudeModel(models, "provider-specialist"), "provider-specialist");
+  assert.throws(
+    () => resolveClaudeModel(models, "not-advertised"),
+    (error) => error.status === 400 && error.code === "model_unavailable",
+  );
+});
 
 async function fixture(t) {
   const createdRoot = await mkdtemp(path.join(tmpdir(), "lattice-review-"));

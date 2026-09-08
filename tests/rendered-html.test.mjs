@@ -71,6 +71,27 @@ test("offers isolated Codex, Claude Code, and Cursor subscription adapters", asy
   assert.match(providers, /delete env\.CURSOR_API_KEY/);
 });
 
+test("selects models from each provider's signed-in subscription catalog", async () => {
+  const [workspace, companion] = await Promise.all([
+    readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../server/index.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(workspace, /aria-label={`\$\{agentName\} model`}/);
+  assert.match(workspace, /lattice:codex-model:/);
+  assert.match(workspace, /lattice:model:\$\{provider\}:/);
+  assert.match(workspace, /model: agentProvider === "cursor" \? null : selectedModel/);
+  assert.match(workspace, /selectedModelSettings/);
+  assert.match(workspace, /function modelOptionLabel\(model: AgentModelOption\)/);
+  assert.match(workspace, /model\.description\.split\(\/\\s\+·\\s\+\//);
+  assert.match(workspace, /\{modelOptionLabel\(model\)\}/);
+  assert.match(companion, /codexClient\.request\("model\/list"/);
+  assert.match(companion, /request: { subtype: "initialize" }/);
+  assert.match(companion, /claudeModelSettingsFromCatalog/);
+  assert.match(companion, /if \(requestedModel\) turnParams\.model = requestedModel/);
+  assert.match(companion, /model_unavailable/);
+});
+
 test("makes local save destinations and persistence state explicit", async () => {
   const [workspace, companion] = await Promise.all([
     readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
