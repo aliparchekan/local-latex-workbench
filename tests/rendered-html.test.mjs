@@ -89,6 +89,11 @@ test("selects models from each provider's signed-in subscription catalog", async
   assert.match(companion, /request: { subtype: "initialize" }/);
   assert.match(companion, /claudeModelSettingsFromCatalog/);
   assert.match(companion, /if \(requestedModel\) turnParams\.model = requestedModel/);
+  assert.match(companion, /allowProviderModelFallback: false/);
+  assert.match(companion, /verifyAcceptedCodexModel/);
+  assert.match(companion, /method === "model\/rerouted"/);
+  assert.match(workspace, /confirmedAgentRuntime/);
+  assert.match(workspace, /confirmed/);
   assert.match(companion, /model_unavailable/);
 });
 

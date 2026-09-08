@@ -986,6 +986,8 @@ async function saveTextFile(body) {
 // --- Codex app-server client -------------------------------------------------
 
 const agentSessions = new Map();
+const sessionRedirects = new Map();
+const startingThreads = new Set();
 const agentSinks = new Set();
 const turnEvents = new EventEmitter();
 turnEvents.setMaxListeners(200);
@@ -999,6 +1001,7 @@ const turnFinalizations = new Map();
 const activeTurns = new Map();
 const completedTurns = new Map();
 const terminalTurns = new Map();
+const agentMessages = new Map();
 const externalProcesses = new Map();
 const externalApprovalWaiters = new Map();
 const externalCancelledTurns = new Set();
@@ -1071,6 +1074,34 @@ function broadcastAgent(threadId, turnId, event) {
     if (sink.turnId && turnId && sink.turnId !== turnId) continue;
     writeNdjson(sink.res, event);
   }
+}
+
+function recordAgentMessage(threadId, turnId, item, delta = null) {
+  const session = agentSessions.get(threadId);
+  if (!session || !turnId || !item?.id) return;
+  let transcript = agentMessages.get(threadId);
+  if (!transcript || transcript.turnId !== turnId) {
+    transcript = { researchRoot: session.researchRoot, paperRoot: session.paperRoot, turnId, messages: new Map() };
+    agentMessages.set(threadId, transcript);
+    const expiry = setTimeout(() => {
+      if (agentMessages.get(threadId) === transcript) agentMessages.delete(threadId);
+    }, TURN_TIMEOUT_MS + 15 * 60_000);
+    expiry.unref();
+  }
+  const previous = transcript.messages.get(item.id);
+  const text = delta !== null ? (previous?.text ?? "") + delta : item.text || previous?.text || "";
+  if (!text || (previous?.text === text && (!item.phase || item.phase === previous.phase))) return;
+  const message = {
+    id: `${threadId}:${turnId}:${item.id}`,
+    threadId,
+    turnId,
+    itemId: item.id,
+    text,
+    phase: item.phase ?? previous?.phase ?? null,
+    revision: (previous?.revision ?? 0) + 1,
+  };
+  transcript.messages.set(item.id, message);
+  broadcastAgent(threadId, turnId, { type: "message", provider: "codex", ...message });
 }
 
 function trackTurnFinalization(threadId, turnId, promise) {
@@ -1577,6 +1608,20 @@ function resolveClaudeModel(models, requestedModel) {
   return model.value;
 }
 
+function verifyAcceptedCodexModel(requestedModel, acceptedModel) {
+  const normalizedAccepted = typeof acceptedModel === "string" && acceptedModel.trim()
+    ? acceptedModel.trim()
+    : null;
+  if (requestedModel && normalizedAccepted !== requestedModel) {
+    throw new HttpError(
+      409,
+      `Codex accepted ${normalizedAccepted ?? "no model"} instead of the selected ${requestedModel}. No turn was started. Refresh the model list and try again.`,
+      "model_mismatch",
+    );
+  }
+  return normalizedAccepted;
+}
+
 async function codexSettingsForProject(researchRoot) {
   const [models, configResponse] = await Promise.all([
     getCodexModelCatalog(),
@@ -1653,8 +1698,38 @@ function handleCodexNotification(method, params) {
     return;
   }
   if (method !== "turn/completed") touchActiveTurn(threadId, notificationTurnId);
+  if (method === "thread/settings/updated") {
+    const settings = params.threadSettings ?? {};
+    const session = agentSessions.get(threadId);
+    if (session) {
+      if (typeof settings.model === "string" && settings.model) session.model = settings.model;
+      session.reasoningEffort = settings.effort ?? null;
+    }
+    broadcastAgent(threadId, turnId, {
+      type: "settings",
+      provider: "codex",
+      model: settings.model ?? session?.model ?? null,
+      reasoningEffort: settings.effort ?? session?.reasoningEffort ?? null,
+      modelConfirmed: true,
+      runtime: "Codex app-server",
+    });
+    return;
+  }
+  if (method === "model/rerouted") {
+    broadcastAgent(threadId, turnId, {
+      type: "settings",
+      provider: "codex",
+      model: params.toModel ?? null,
+      requestedModel: params.fromModel ?? null,
+      reasoningEffort: agentSessions.get(threadId)?.reasoningEffort ?? null,
+      modelConfirmed: true,
+      modelRerouted: true,
+      runtime: "Codex app-server",
+    });
+    return;
+  }
   if (method === "item/agentMessage/delta") {
-    broadcastAgent(threadId, turnId, { type: "delta", text: params.delta ?? "" });
+    recordAgentMessage(threadId, turnId, { id: params.itemId }, params.delta ?? "");
     return;
   }
   if (method === "turn/diff/updated") {
@@ -1668,6 +1743,7 @@ function handleCodexNotification(method, params) {
   }
   if (method === "item/started" || method === "item/completed") {
     const item = params.item;
+    if (item?.type === "agentMessage") recordAgentMessage(threadId, turnId, item);
     if (item?.type === "fileChange") {
       fileItems.set(itemKey(threadId, turnId, item.id), item.changes ?? []);
       if (method === "item/completed") {
@@ -1698,6 +1774,9 @@ function handleCodexNotification(method, params) {
     return;
   }
   if (method === "turn/completed") {
+    for (const item of params.turn?.items ?? []) {
+      if (item.type === "agentMessage") recordAgentMessage(threadId, params.turn.id, item);
+    }
     if (threadId && params.turn?.id) {
       const terminalKey = turnKey(threadId, params.turn.id);
       terminalTurns.set(terminalKey, params.turn);
@@ -2570,9 +2649,13 @@ async function agentTurnStatus(body) {
   } catch (error) {
     throw new HttpError(error.status ?? 400, error.message, error.code ?? "unsupported_provider");
   }
-  const requestedThreadId = body.threadId == null || body.threadId === ""
+  let requestedThreadId = body.threadId == null || body.threadId === ""
     ? null
     : assertString(body.threadId, "threadId", { maxLength: 256 });
+  const redirect = provider === "codex" ? sessionRedirects.get(requestedThreadId) : null;
+  if (redirect?.researchRoot === roots.researchRoot && redirect?.paperRoot === roots.paperRoot) {
+    requestedThreadId = redirect.threadId;
+  }
 
   let active = requestedThreadId ? activeTurns.get(requestedThreadId) ?? null : null;
   if (!requestedThreadId) {
@@ -2617,12 +2700,17 @@ async function agentTurnStatus(body) {
     lastActivityAt: scopedApproval.createdAt,
     provider,
   } : null);
+  const transcript = provider === "codex" ? agentMessages.get(requestedThreadId ?? recoveredTurn?.threadId) : null;
+  const messages = transcript?.researchRoot === roots.researchRoot && transcript?.paperRoot === roots.paperRoot
+    ? [...transcript.messages.values()]
+    : [];
 
   return {
     ok: true,
     active: Boolean(recoveredTurn),
     turn: publicActiveTurn(recoveredTurn),
     approval: publicPendingApproval(scopedApproval),
+    ...(messages.length ? { messages } : {}),
   };
 }
 
@@ -2923,6 +3011,7 @@ function paperAgentInstructions(researchRoot, paperRoot) {
     "When a source or PDF-mapped selection is attached, treat it as the primary target, not a hard boundary.",
     "You may make minimal related edits elsewhere in the research workspace when needed for consistency, references, figures, analysis, or compilation.",
     "Use apply_patch for all text edits so the user receives a reviewable diff and undo support.",
+    "For substantial tasks, send a short progress message before inspecting files and share concise findings as you work. Do not save all user-facing updates for the final response.",
     "To rerun code that must create or replace non-paper outputs, use request_permissions for the smallest dedicated output folder, never an individual output file. A requested new folder may be created after approval. The user may grant that folder for this turn only.",
     "A generated-figure folder may be inside the paper folder. Never request the paper folder itself or an ancestor containing it; manuscript and source changes must stay in the reviewed text-change flow.",
     "Never write outside the research root, request network access, request a session-wide grant, or bypass the approval flow.",
@@ -2930,58 +3019,101 @@ function paperAgentInstructions(researchRoot, paperRoot) {
   ].join("\n");
 }
 
-async function openAgentSession(researchRoot, paperRoot, requestedThreadId) {
-  await codexClient.ensureReady();
-  if (requestedThreadId) {
-    const existing = agentSessions.get(requestedThreadId);
-    if (existing && existing.generation === codexClient.generation) {
-      if (existing.researchRoot !== researchRoot || existing.paperRoot !== paperRoot) {
-        throw new HttpError(409, "This Codex thread belongs to a different project.");
-      }
-      return existing;
-    }
-    const response = await codexClient.request("thread/resume", {
-      threadId: requestedThreadId,
-      cwd: researchRoot,
-      runtimeWorkspaceRoots: [researchRoot],
-      sandbox: "read-only",
-      approvalPolicy: RESEARCH_APPROVAL_POLICY,
-      approvalsReviewer: "user",
-      developerInstructions: paperAgentInstructions(researchRoot, paperRoot),
-    });
-    const threadId = response.thread?.id ?? requestedThreadId;
-    const session = {
-      threadId,
-      researchRoot,
-      paperRoot,
-      model: response.model ?? null,
-      reasoningEffort: response.reasoningEffort ?? null,
-      generation: codexClient.generation,
-    };
-    agentSessions.set(threadId, session);
-    return session;
+function reserveAgentThread(threadId) {
+  if (!threadId) return () => {};
+  if (startingThreads.has(threadId) || activeTurns.has(threadId)) {
+    throw new HttpError(409, "This conversation is already working in another window. Wait for that turn to finish.", "thread_busy");
   }
+  startingThreads.add(threadId);
+  return () => startingThreads.delete(threadId);
+}
 
-  const response = await codexClient.request("thread/start", {
+async function openAgentSession(researchRoot, paperRoot, requestedThreadId, requestedModel, client = codexClient) {
+  await client.ensureReady();
+  const originalThreadId = requestedThreadId;
+  const redirect = sessionRedirects.get(requestedThreadId);
+  if (redirect) {
+    if (redirect.researchRoot !== researchRoot || redirect.paperRoot !== paperRoot) {
+      throw new HttpError(409, "This Codex thread belongs to a different project.");
+    }
+    requestedThreadId = redirect.threadId;
+  }
+  const params = {
+    ...(requestedModel ? { model: requestedModel } : {}),
     cwd: researchRoot,
     runtimeWorkspaceRoots: [researchRoot],
     sandbox: "read-only",
     approvalPolicy: RESEARCH_APPROVAL_POLICY,
     approvalsReviewer: "user",
     developerInstructions: paperAgentInstructions(researchRoot, paperRoot),
-    ephemeral: false,
-  });
+  };
+  let response;
+  let recoveredFromThreadId = redirect ? originalThreadId : null;
+  if (requestedThreadId) {
+    const existing = agentSessions.get(requestedThreadId);
+    if (existing && existing.generation === client.generation) {
+      if (existing.researchRoot !== researchRoot || existing.paperRoot !== paperRoot) {
+        throw new HttpError(409, "This Codex thread belongs to a different project.");
+      }
+      if (activeTurns.has(requestedThreadId)) {
+        throw new HttpError(409, "This Codex thread already has an active turn in another browser window.");
+      }
+      if (requestedModel && existing.model !== requestedModel) {
+        // A loaded thread already owns its writer. Change its settings in place.
+        await client.request("thread/settings/update", { threadId: requestedThreadId, model: requestedModel });
+        const { thread } = await client.request("thread/read", { threadId: requestedThreadId, includeTurns: false });
+        existing.model = verifyAcceptedCodexModel(requestedModel, thread?.model);
+        existing.reasoningEffort = thread?.reasoningEffort ?? existing.reasoningEffort;
+      }
+      existing.recoveredFromThreadId = recoveredFromThreadId;
+      return existing;
+    }
+    try {
+      response = await client.request("thread/resume", { ...params, threadId: requestedThreadId });
+    } catch (error) {
+      if (!error.message?.includes(`thread ${requestedThreadId} already has an active writer`)) throw error;
+      const { thread } = await client.request("thread/read", { threadId: requestedThreadId, includeTurns: false });
+      if (!thread?.cwd || !isWithin(researchRoot, thread.cwd)) {
+        throw new HttpError(409, "The locked conversation belongs to a different research folder.");
+      }
+      const latest = await client.request("thread/turns/list", {
+        threadId: requestedThreadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded",
+      });
+      if (thread.status?.type === "active" || latest.data?.[0]?.status === "inProgress") {
+        throw new HttpError(409, "This conversation is still running in another Codex window. Finish or stop it there, then send your message again.", "thread_busy");
+      }
+      response = await client.request("thread/fork", {
+        ...params,
+        threadId: requestedThreadId,
+        ephemeral: false,
+        excludeTurns: true,
+        deferGoalContinuation: true,
+      });
+      if (!response.thread?.id || response.thread.id === requestedThreadId) {
+        throw new Error("Codex could not create a recovered conversation. Please retry.");
+      }
+      recoveredFromThreadId = requestedThreadId;
+    }
+  } else {
+    response = await client.request("thread/start", {
+      ...params,
+      allowProviderModelFallback: false,
+      ephemeral: false,
+    });
+  }
   const threadId = response.thread?.id;
   if (!threadId) throw new Error("Codex did not return a thread id.");
   const session = {
     threadId,
     researchRoot,
     paperRoot,
-    model: response.model ?? null,
+    model: verifyAcceptedCodexModel(requestedModel, response.model),
     reasoningEffort: response.reasoningEffort ?? null,
-    generation: codexClient.generation,
+    generation: client.generation,
+    recoveredFromThreadId,
   };
   agentSessions.set(threadId, session);
+  if (recoveredFromThreadId) sessionRedirects.set(recoveredFromThreadId, { threadId, researchRoot, paperRoot });
   return session;
 }
 
@@ -3344,7 +3476,11 @@ async function streamAgentTurn(res, body) {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Transfer-Encoding": "chunked",
     Connection: "keep-alive",
+    "Cache-Control": "no-store, no-transform",
+    "X-Accel-Buffering": "no",
   });
+  res.flushHeaders();
+  res.socket?.setNoDelay(true);
   writeNdjson(res, { type: "status", provider, label: `Connecting to your ${AGENT_PROVIDERS[provider].subscription} subscription…` });
 
   if (EXTERNAL_PROVIDER_IDS.includes(provider)) {
@@ -3361,20 +3497,32 @@ async function streamAgentTurn(res, body) {
   }
 
   let sink = null;
+  let releaseThread = () => {};
+  let releaseRecoveredThread = () => {};
+  let turnStarted = false;
   try {
-    const session = await openAgentSession(researchRoot, paperRoot, body.threadId);
+    releaseThread = reserveAgentThread(body.threadId);
+    if (requestedEffort) await validateReasoningEffort(requestedModel, requestedEffort);
+    const session = await openAgentSession(researchRoot, paperRoot, body.threadId, requestedModel);
+    if (session.threadId !== body.threadId) releaseRecoveredThread = reserveAgentThread(session.threadId);
     writeNdjson(res, {
       type: "thread",
+      provider: "codex",
       threadId: session.threadId,
-      model: requestedModel ?? session.model,
-      reasoningEffort: requestedEffort ?? session.reasoningEffort,
+      model: session.model,
+      reasoningEffort: session.reasoningEffort,
+      modelConfirmed: true,
+      runtime: "Codex app-server",
+      recoveredFromThreadId: session.recoveredFromThreadId,
     });
+    if (session.recoveredFromThreadId) {
+      writeNdjson(res, { type: "notice", message: "Your conversation was continued in a workbench session because another Codex window owns the original. Its saved history has been carried over." });
+    }
     writeNdjson(res, { type: "status", label: body.threadId ? "Resuming the paper conversation…" : "Starting a paper conversation…" });
     sink = { res, threadId: session.threadId, turnId: null };
     agentSinks.add(sink);
     res.once("close", () => agentSinks.delete(sink));
 
-    if (requestedEffort) await validateReasoningEffort(requestedModel ?? session.model, requestedEffort);
     const turnParams = {
       threadId: session.threadId,
       cwd: researchRoot,
@@ -3387,10 +3535,9 @@ async function streamAgentTurn(res, body) {
     if (requestedModel) turnParams.model = requestedModel;
     if (requestedEffort) turnParams.effort = requestedEffort;
     const response = await codexClient.request("turn/start", turnParams);
+    turnStarted = true;
     const turnId = response.turn?.id;
     if (!turnId) throw new Error("Codex did not return a turn id.");
-    if (requestedModel) session.model = requestedModel;
-    if (requestedEffort) session.reasoningEffort = requestedEffort;
     const active = registerActiveTurn(session, response.turn);
     sink.turnId = turnId;
     writeNdjson(res, {
@@ -3398,16 +3545,23 @@ async function streamAgentTurn(res, body) {
       threadId: session.threadId,
       turnId,
       status: active?.status ?? "inProgress",
+      provider: "codex",
+      model: session.model,
+      reasoningEffort: session.reasoningEffort,
+      modelConfirmed: true,
+      runtime: "Codex app-server",
       startedAt: active?.startedAt,
       lastActivityAt: active?.lastActivityAt,
     });
     await waitForTurn(session.threadId, turnId, res);
     if (!res.writableEnded && !res.destroyed) res.end();
   } catch (error) {
-    writeNdjson(res, { type: "error", message: error.message });
+    writeNdjson(res, { type: "error", message: error.message, terminal: !turnStarted, code: error.code });
     if (!res.writableEnded && !res.destroyed) res.end();
   } finally {
     if (sink) agentSinks.delete(sink);
+    releaseThread();
+    releaseRecoveredThread();
   }
 }
 
@@ -3602,6 +3756,11 @@ if (isMainModule) {
 export {
   HttpError,
   activeTurns,
+  agentMessages,
+  agentSinks,
+  handleCodexNotification,
+  reserveAgentThread,
+  openAgentSession,
   applyExternalApproval,
   agentSessions,
   agentTurnStatus,
@@ -3621,6 +3780,7 @@ export {
   readTextFile,
   resolveClaudeModel,
   resolveCodexModel,
+  verifyAcceptedCodexModel,
   safeApprovalPath,
   saveTextFile,
   stopAgentTurn,
