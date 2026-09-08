@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { api, LOCAL_API, relativeTo } from "../lib/api";
+import { mergeAgentMessages } from "../lib/agent-messages.mjs";
 import type { PdfFocus, ProjectInfo, SourceSelection } from "../lib/api";
 import { DiffViewer } from "./DiffViewer";
 import type { ApprovalReviewFile, ApprovalWriteTarget, PendingApproval } from "./DiffViewer";
@@ -78,10 +79,15 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  revision?: number;
 };
 
 type StreamEvent = {
   type: string;
+  id?: string;
+  revision?: number;
+  terminal?: boolean;
+  recoveredFromThreadId?: string | null;
   provider?: AgentProvider;
   agentName?: string;
   approvalType?: "file" | "permission";
@@ -101,6 +107,21 @@ type StreamEvent = {
   status?: string;
   applied?: boolean;
   undoAvailable?: boolean;
+  model?: string | null;
+  requestedModel?: string | null;
+  reasoningEffort?: string | null;
+  modelConfirmed?: boolean;
+  modelRerouted?: boolean;
+  runtime?: string;
+};
+
+type ConfirmedAgentRuntime = {
+  provider: AgentProvider;
+  model: string;
+  requestedModel: string | null;
+  reasoningEffort: string | null;
+  runtime: string;
+  rerouted: boolean;
 };
 
 type ApplyStatus = {
@@ -140,6 +161,7 @@ type AgentStatusResponse = {
   active: boolean;
   turn: AgentTurnStatus | null;
   approval: AgentApprovalStatus | null;
+  messages?: Array<{ id: string; text: string; revision: number }>;
 };
 
 type StopTurnResponse = {
@@ -437,6 +459,7 @@ export function PaperWorkspace() {
   const [agentSettings, setAgentSettings] = useState<AgentSettings | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
+  const [confirmedAgentRuntime, setConfirmedAgentRuntime] = useState<ConfirmedAgentRuntime | null>(null);
   const [latestDiff, setLatestDiff] = useState("");
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
@@ -458,6 +481,13 @@ export function PaperWorkspace() {
   const providerHealth = health?.providers?.[agentProvider] ?? health?.[agentProvider];
   const selectedModelSettings = agentSettings?.models?.find((model) => model.model === selectedModel) ?? null;
   const intelligenceSettings = selectedModelSettings ?? agentSettings;
+  const confirmedModelSettings = agentSettings?.models?.find(
+    (model) => model.model === confirmedAgentRuntime?.model,
+  ) ?? null;
+  const confirmedRuntimeLabel = confirmedAgentRuntime?.provider === agentProvider
+    ? confirmedModelSettings?.displayName ?? confirmedAgentRuntime.model
+    : null;
+  const confirmedRuntimeState = confirmedAgentRuntime?.rerouted ? "Codex reroute" : "confirmed";
   const projectRef = useRef<ProjectInfo | null>(null);
   const activePathRef = useRef<string | null>(null);
   const contentRef = useRef("");
@@ -467,6 +497,7 @@ export function PaperWorkspace() {
   const saveTimesRef = useRef(new Map<string, number>());
   const saveQueueRef = useRef<Promise<boolean> | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const activeAssistantRef = useRef<string | null>(null);
   const agentStatusInFlightRef = useRef(false);
   const turnMonitorRef = useRef<TurnMonitor | null>(null);
   const initializedRef = useRef(false);
@@ -490,6 +521,7 @@ export function PaperWorkspace() {
   const replaceProject = useCallback((value: ProjectInfo | null) => {
     projectRef.current = value;
     setProject(value);
+    setConfirmedAgentRuntime(null);
   }, []);
 
   const replaceActivePath = useCallback((value: string | null) => {
@@ -736,6 +768,9 @@ export function PaperWorkspace() {
       if (result.turn?.threadId) {
         localStorage.setItem(threadKey(statusProject.researchRoot, agentProvider), result.turn.threadId);
       }
+      if (result.messages?.length) {
+        setMessages(current => mergeAgentMessages(current, result.messages ?? [], activeAssistantRef.current));
+      }
       if (result.active && result.turn) {
         setMonitoredTurn({
           threadId: result.turn.threadId,
@@ -749,13 +784,12 @@ export function PaperWorkspace() {
       } else {
         const localTurn = turnMonitorRef.current;
         const activeStream = streamAbortRef.current;
-        const justStarted = Boolean(
+        const streamStillDelivering = Boolean(
           activeStream
           && localTurn
-          && !localTurn.turnId
-          && Date.now() - localTurn.startedAt < 5_000,
+          && Date.now() - localTurn.lastActivityAt < 90_000,
         );
-        if (!justStarted) {
+        if (!streamStillDelivering) {
           setMonitoredTurn(null);
           activeStream?.abort();
           if (streamAbortRef.current === activeStream) streamAbortRef.current = null;
@@ -1439,6 +1473,7 @@ export function PaperWorkspace() {
     const startedAt = beginMonitoredTurn(storedThread);
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
+    activeAssistantRef.current = assistantId;
     setMessages((current) => [
       ...current,
       { id: userId, role: "user", text: message },
@@ -1476,9 +1511,25 @@ export function PaperWorkspace() {
       let approvalPresented: "file" | "permission" | null = null;
       let activePresentedApproval: { id: string; approvalType: "file" | "permission" } | null = null;
       let applyLifecycleHandled = false;
+      let terminalError: string | null = null;
       const consume = (event: StreamEvent) => {
         if (event.threadId) localStorage.setItem(threadKey(project.researchRoot, agentProvider), event.threadId);
-        if (event.type !== "completed") {
+        if (
+          (event.type === "thread" || event.type === "settings" || event.type === "turn")
+          && event.provider === agentProvider
+          && event.modelConfirmed
+          && event.model
+        ) {
+          setConfirmedAgentRuntime({
+            provider: event.provider,
+            model: event.model,
+            requestedModel: event.requestedModel ?? null,
+            reasoningEffort: event.reasoningEffort ?? null,
+            runtime: event.runtime ?? agentName,
+            rerouted: Boolean(event.modelRerouted),
+          });
+        }
+        if (event.type !== "completed" && !(event.type === "error" && event.terminal)) {
           const currentTurn = turnMonitorRef.current;
           const activityAt = Date.now();
           setMonitoredTurn({
@@ -1489,7 +1540,19 @@ export function PaperWorkspace() {
             lastActivityAt: activityAt,
           });
         }
-        if (event.type === "delta" && event.text) {
+        if (event.type === "message" && event.id && event.text) {
+          setMessages(current => mergeAgentMessages(current, [{
+            id: event.id!, text: event.text!, revision: event.revision ?? 1,
+          }], assistantId));
+        } else if (event.type === "notice" && event.message) {
+          setMessages(current => {
+            const placeholder = current.findIndex(item => item.id === assistantId);
+            const notice: ChatMessage = { id: crypto.randomUUID(), role: "assistant", text: event.message! };
+            const next = [...current];
+            next.splice(placeholder < 0 ? next.length : placeholder, 0, notice);
+            return next;
+          });
+        } else if (event.type === "delta" && event.text) {
           setMessages((current) => current.map((item) =>
             item.id === assistantId ? { ...item, text: item.text + event.text } : item,
           ));
@@ -1565,6 +1628,12 @@ export function PaperWorkspace() {
           }
         } else if (event.type === "error") {
           setError(event.message || `${agentName} encountered an error`);
+          if (event.terminal) {
+            terminalError = event.message || `${agentName} could not start`;
+            setMonitoredTurn(null);
+            setAgentStatus("Ready");
+            setPrompt(current => current || message);
+          }
         } else if (event.type === "completed") {
           setMonitoredTurn(null);
           const activeApply = activeApplyRef.current;
@@ -1600,13 +1669,13 @@ export function PaperWorkspace() {
         item.id === assistantId && !item.text
           ? {
             ...item,
-            text: approvalPresented === "permission"
+            text: terminalError ?? (approvalPresented === "permission"
               ? "I requested turn-only access to write research-support outputs."
               : approvalPresented === "file"
                 ? "I prepared source changes for your review."
               : recoveringTurn
                 ? "The live connection ended; I’m recovering this turn."
-                : "Done.",
+                : "Done."),
           }
           : item,
       ));
@@ -1628,6 +1697,7 @@ export function PaperWorkspace() {
       }
     } finally {
       streamAbortRef.current = null;
+      activeAssistantRef.current = null;
       setAgentBusy(turnMonitorRef.current !== null);
     }
   };
@@ -1982,6 +2052,7 @@ export function PaperWorkspace() {
               setAgentSettings(null);
               setSelectedModel("");
               setReasoningEffort("");
+              setConfirmedAgentRuntime(null);
               setMessages([]);
               setLatestDiff("");
               setAgentStatus("Ready");
@@ -2306,7 +2377,20 @@ export function PaperWorkspace() {
         <aside id="codex-pane" className="agent-panel">
           <div className="agent-header">
             <div className="agent-avatar"><Sparkles size={17} /></div>
-            <div><span className="eyebrow">Your local agent</span><strong>{agentName}</strong></div>
+            <div>
+              <span className="eyebrow">Your local agent</span>
+              <strong>{agentName}</strong>
+              {confirmedRuntimeLabel ? (
+                <small
+                  className={`agent-runtime${confirmedAgentRuntime?.rerouted ? " is-rerouted" : ""}`}
+                  title={confirmedAgentRuntime?.rerouted
+                    ? `${confirmedAgentRuntime.runtime} rerouted ${confirmedAgentRuntime.requestedModel} to ${confirmedAgentRuntime.model}`
+                    : `${confirmedAgentRuntime?.runtime} confirmed ${confirmedAgentRuntime?.model}`}
+                >
+                  {confirmedRuntimeLabel} · {confirmedRuntimeState}
+                </small>
+              ) : null}
+            </div>
             <span className={`agent-status ${agentBusy || turnActive ? "busy" : ""}`}>{agentStatus}</span>
           </div>
 

@@ -27,6 +27,7 @@ import {
   saveTextFile,
   stopAgentTurn,
   undoChanges,
+  verifyAcceptedCodexModel,
 } from "../server/index.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -79,6 +80,18 @@ test("exposes every visible subscription model and rejects unavailable selection
   assert.throws(
     () => resolveCodexModel(models, "not-on-this-subscription"),
     (error) => error.status === 400 && error.code === "model_unavailable",
+  );
+});
+
+test("fails closed when Codex does not accept the selected model", () => {
+  assert.equal(verifyAcceptedCodexModel("gpt-5.6-sol", "gpt-5.6-sol"), "gpt-5.6-sol");
+  assert.throws(
+    () => verifyAcceptedCodexModel("gpt-5.6-sol", "gpt-5.6-terra"),
+    (error) => error.status === 409 && error.code === "model_mismatch",
+  );
+  assert.throws(
+    () => verifyAcceptedCodexModel("gpt-5.6-sol", null),
+    (error) => error.status === 409 && error.code === "model_mismatch",
   );
 });
 
