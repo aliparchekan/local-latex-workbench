@@ -19,6 +19,9 @@ import {
   providerName,
   providerThreadId,
 } from "./providers.mjs";
+import { resolveWorkbenchSkill, skillPrompt, skillTurnInput, assertSkillAllowsChanges, selectionMatchesSource, DATA_CONTEXT_GUIDANCE } from "./workbench-skills.mjs";
+import { inspectLocalData } from "./data-inspector.mjs";
+import { PAPER_CHECK_SCHEMA } from "../app/lib/workbench-skills.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = 4317;
@@ -486,6 +489,7 @@ async function getHealth() {
       && latexmk.code === 0
       && synctex.code === 0,
     platform: { os: process.platform, arch: process.arch },
+    capabilities: { paperSkills: true, paperSkillsVersion: 2 },
     providers,
     codex: providers.codex,
     claude: providers.claude,
@@ -2219,10 +2223,24 @@ function armApprovalTimeout(pending) {
   pending.timeout.unref();
 }
 
-async function handleCodexServerRequest(message) {
+async function handleCodexServerRequest(message, client = codexClient) {
   const params = message.params ?? {};
   const session = agentSessions.get(params.threadId);
   touchActiveTurn(params.threadId, params.turnId);
+  // Enforce audits in the companion as well as the sandbox. Set the session
+  // policy before turn/start, since requests can arrive before its response.
+  if (session?.workbenchSkill && (session.workbenchSkill.readOnly || message.method !== "item/fileChange/requestApproval") && [
+    "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/commandExecution/requestApproval",
+  ].includes(message.method)) {
+    client.respond(message.id, message.method === "item/permissions/requestApproval"
+      ? { permissions: {}, scope: "turn" } : { decision: "decline" });
+    broadcastAgent(params.threadId, params.turnId, {
+      type: "notice", message: session.workbenchSkill.readOnly
+        ? `${session.workbenchSkill.label ?? "This skill"} is read-only. A request to change files or expand access was blocked.`
+        : `${session.workbenchSkill.label ?? "This skill"} only allows scoped, reviewed edits. Extra command access was blocked.`,
+    });
+    return;
+  }
   if (message.method === "item/permissions/requestApproval") {
     if (!session) {
       codexClient.respond(message.id, { permissions: {}, scope: "turn" });
@@ -2309,7 +2327,9 @@ async function handleCodexServerRequest(message) {
   let reviewFiles;
   try {
     approvalTargets = await pathsForFileApproval(session, params);
+    assertSkillAllowsChanges(session.workbenchSkill, approvalTargets.changes);
     if (approvalTargets.paths.length === 0) throw new HttpError(403, "The requested file targets could not be verified.");
+    assertSkillTargets(session, approvalTargets.paths.map((target) => target.path));
     await assertTextTargets(approvalTargets.paths);
     const materialized = await materializeReviewFiles(session, approvalTargets.changes);
     reviewFiles = materialized.files;
@@ -3118,8 +3138,9 @@ async function openAgentSession(researchRoot, paperRoot, requestedThreadId, requ
 }
 
 async function agentPrompt(body, researchRoot) {
-  const prompt = body.prompt ?? body.message ?? body.instruction;
-  assertString(prompt, "prompt", { maxLength: 300_000 });
+  const authorPrompt = body.prompt ?? body.message ?? body.instruction;
+  assertString(authorPrompt, "prompt", { maxLength: 300_000 });
+  const prompt = `${DATA_CONTEXT_GUIDANCE}\n\nAuthor request:\n${authorPrompt}`;
   if (!body.selection) return prompt;
   const selection = body.selection;
   const selectionPath = selection.path ?? selection.file;
@@ -3158,6 +3179,71 @@ async function agentPrompt(body, researchRoot) {
     "--- end mapped LaTeX source ---",
   );
   return context.join("\n");
+}
+
+async function prepareAgentRequest(body, researchRoot, paperRoot) {
+  let skill;
+  try {
+    skill = await resolveWorkbenchSkill(body.skill, body.selection);
+  } catch (error) {
+    if (error.code === "invalid_skill") throw new HttpError(400, error.message, error.code);
+    throw error;
+  }
+  if (!skill) return { skill: null, prompt: await agentPrompt(body, researchRoot) };
+  const main = await resolveMainFile(researchRoot, paperRoot, body.mainFile);
+  let selection = null;
+  if (skill.scope === "selection") {
+    selection = body.selection;
+    const target = await safePath(researchRoot, selection.path, { mustExist: true, fileOnly: true });
+    if (!isWithin(paperRoot, target.path)) throw new HttpError(403, "Select text inside the paper folder for this skill.");
+    const file = await readTextFile(researchRoot, target.path);
+    if (!selectionMatchesSource(file.content, selection)) {
+      throw new HttpError(409, "The selected source has changed. Select the passage again before running this skill.");
+    }
+    skill.targetPath = target.path;
+  }
+  if (skill.scope === "resources") {
+    skill.dataEvidence = [];
+    for (const resource of skill.resourcePaths) {
+      const target = await safeApprovalPath(researchRoot, resource, { mustExist: true });
+      try {
+        const evidence = await inspectLocalData(target.path, resource);
+        const encoded = JSON.stringify(evidence);
+        skill.dataEvidence.push(encoded.length <= 24_000 ? evidence : {
+          path: resource, bytes: evidence.bytes, bytesRead: evidence.bytesRead, modifiedAt: evidence.modifiedAt,
+          sha256: evidence.sha256, hashScope: evidence.hashScope, coverage: evidence.coverage,
+          previewExcerpt: encoded.slice(0, 20_000), limitations: ["Inspection output is too large; this excerpt is truncated and may omit fields or records."],
+        });
+      } catch (error) {
+        throw new HttpError(400, `Cannot inspect ${resource}: ${error.message}`, "data_inspection_unavailable");
+      }
+    }
+    if (skill.outputPath) {
+      const target = await safeApprovalPath(researchRoot, skill.outputPath, { mustExist: false });
+      skill.outputAbsolutePath = target.path;
+    }
+  }
+  const authorPrompt = body.prompt == null || body.prompt === "" ? `Run ${skill.label}.` : body.prompt;
+  const attached = await agentPrompt({ ...body, prompt: authorPrompt, selection }, researchRoot);
+  return { skill, prompt: skillPrompt(skill, {
+    mainFile: relativePortable(researchRoot, main), paperRoot, prompt: attached,
+  }) };
+}
+
+function assertSkillTargets(session, targets) {
+  const skill = session.workbenchSkill;
+  assertSkillAllowsChanges(skill, targets);
+  if ((skill?.id === "polish-selection" || (skill?.id === "english-consistency" && skill.scope === "selection"))
+    && targets.some((target) => target !== skill.targetPath)) {
+    throw new HttpError(403, "Polish selection can only change its selected source file. Use a normal chat request for related files.");
+  }
+  if (skill?.id === "english-consistency" && targets.some(target => !isWithin(session.paperRoot, target)
+    || ![".tex", ".md", ".markdown", ".txt", ".bib"].includes(path.extname(target).toLowerCase()))) {
+    throw new HttpError(403, "English consistency can only change existing prose files inside the paper folder.");
+  }
+  if (skill?.id === "generate-report" && targets.some(target => target !== skill.outputAbsolutePath)) {
+    throw new HttpError(403, "Results report can only change the chosen Markdown output file.");
+  }
 }
 
 function completeExternalTurn(session, turnId, status = "completed", undoAvailable = false) {
@@ -3245,6 +3331,7 @@ function runExternalProvider(provider, invocation, session, turnId) {
 }
 
 async function proposalChangesForReview(session, proposal) {
+  assertSkillAllowsChanges(session.workbenchSkill, proposal.changes);
   const changes = [];
   for (const proposed of proposal.changes) {
     const proposedPath = assertString(proposed.path, "proposed path", { maxLength: 16_384 });
@@ -3256,6 +3343,7 @@ async function proposalChangesForReview(session, proposal) {
       throw new HttpError(403, `${providerName(session.provider)} returned a path outside the research workspace.`);
     }
     const target = await safeApprovalPath(session.researchRoot, normalized, { mustExist: false });
+    assertSkillTargets(session, [target.path]);
     if (proposed.action === "delete") {
       if (!target.exists) {
         throw new HttpError(409, `${relativePortable(session.researchRoot, target.path)} no longer exists.`);
@@ -3279,10 +3367,11 @@ async function proposalChangesForReview(session, proposal) {
         : createTwoFilesPatch(displayPath, displayPath, before, proposed.content, "current", "proposed"),
     });
   }
+  assertSkillAllowsChanges(session.workbenchSkill, changes);
   return changes;
 }
 
-async function streamExternalAgentTurn(res, body, provider, roots, prompt, requestedEffort, requestedModel) {
+async function streamExternalAgentTurn(res, body, provider, roots, prompt, requestedEffort, requestedModel, skill = null) {
   const name = providerName(provider);
   const requestedThreadId = body.threadId == null || body.threadId === ""
     ? null
@@ -3299,6 +3388,7 @@ async function streamExternalAgentTurn(res, body, provider, roots, prompt, reque
     paperRoot: roots.paperRoot,
     provider,
     generation: null,
+    workbenchSkill: skill,
   };
   const active = registerActiveTurn(session, { id: turnId, status: "inProgress" });
   const sink = { res, threadId, turnId };
@@ -3325,6 +3415,8 @@ async function streamExternalAgentTurn(res, body, provider, roots, prompt, reque
       sessionId: provider === "claude" && !requestedThreadId ? provisionalRawId : null,
       model: provider === "claude" ? requestedModel : null,
       reasoningEffort: provider === "claude" ? requestedEffort : null,
+      readOnly: Boolean(skill?.readOnly),
+      reportKind: skill?.id === "check-paper" ? "paper-check-v1" : "text",
     });
     const result = await runExternalProvider(provider, invocation, session, turnId);
     if (result.stopped || externalCancelledTurns.has(turnKey(session.threadId, turnId))) {
@@ -3337,7 +3429,7 @@ async function streamExternalAgentTurn(res, body, provider, roots, prompt, reque
       const detail = `${result.stderr}\n${result.stdout}`.trim().slice(-4_000);
       throw new Error(detail || `${name} exited before returning a proposal.`);
     }
-    const parsed = parseProviderResult(provider, result.stdout);
+    const parsed = parseProviderResult(provider, result.stdout, { readOnly: Boolean(skill?.readOnly), reportKind: skill?.id === "check-paper" ? "paper-check-v1" : "text" });
     if (parsed.sessionId) {
       const nextThreadId = providerThreadId(provider, parsed.sessionId);
       if (nextThreadId !== session.threadId) {
@@ -3451,7 +3543,7 @@ function waitForTurn(threadId, turnId, res) {
 
 async function streamAgentTurn(res, body) {
   const { researchRoot, paperRoot } = await canonicalRoots(body.researchRoot, body.paperRoot);
-  const prompt = await agentPrompt(body, researchRoot);
+  const { prompt, skill } = await prepareAgentRequest(body, researchRoot, paperRoot);
   let provider;
   try {
     provider = normalizeProvider(body.provider);
@@ -3492,6 +3584,7 @@ async function streamAgentTurn(res, body) {
       prompt,
       requestedEffort,
       requestedModel,
+      skill,
     );
     return;
   }
@@ -3504,6 +3597,7 @@ async function streamAgentTurn(res, body) {
     releaseThread = reserveAgentThread(body.threadId);
     if (requestedEffort) await validateReasoningEffort(requestedModel, requestedEffort);
     const session = await openAgentSession(researchRoot, paperRoot, body.threadId, requestedModel);
+    session.workbenchSkill = skill;
     if (session.threadId !== body.threadId) releaseRecoveredThread = reserveAgentThread(session.threadId);
     writeNdjson(res, {
       type: "thread",
@@ -3530,8 +3624,12 @@ async function streamAgentTurn(res, body) {
       approvalPolicy: RESEARCH_APPROVAL_POLICY,
       approvalsReviewer: "user",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
-      input: [{ type: "text", text: prompt, text_elements: [] }],
+      input: skillTurnInput(prompt, skill),
     };
+    if (skill?.readOnly) {
+      turnParams.approvalPolicy = "never";
+      if (skill.id === "check-paper") turnParams.outputSchema = PAPER_CHECK_SCHEMA;
+    }
     if (requestedModel) turnParams.model = requestedModel;
     if (requestedEffort) turnParams.effort = requestedEffort;
     const response = await codexClient.request("turn/start", turnParams);
@@ -3759,6 +3857,8 @@ export {
   agentMessages,
   agentSinks,
   handleCodexNotification,
+  handleCodexServerRequest,
+  prepareAgentRequest,
   reserveAgentThread,
   openAgentSession,
   applyExternalApproval,

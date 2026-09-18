@@ -1,0 +1,13 @@
+# Bundled workbench skill provenance
+
+These are curated adaptations, not an installation of all upstream skills. They are loaded only for a selected workbench action and are not installed into the user's global agent configuration.
+
+Upstream: [ExplorerFreda/fskills](https://github.com/ExplorerFreda/fskills), reviewed commit `824f95cb33fe6756a46f5a47e2dba5293c59dc63`. Upstream is distributed under [Apache-2.0](https://github.com/ExplorerFreda/fskills/blob/824f95cb33fe6756a46f5a47e2dba5293c59dc63/LICENSE); a copy is the repository's root LICENSE. Preserve this provenance and the notices when redistributing.
+
+- `workbench-paper-check/SKILL.md` adapts `review-paper/SKILL.md` under Apache-2.0. Modified by the Local LaTeX Workbench contributors: source/PDF attachment scope, read-only structured findings, no personal annotations, no imposed house style, no compilation, no network lookups, and no report-file writes.
+- `workbench-english/SKILL.md` adapts `ensure-english-consistency/SKILL.md` under Apache-2.0. Modified to restrict edits to existing paper prose (or a selection), protect bibliography metadata, and use workbench approvals instead of repository-wide rewriting.
+- `workbench-inspect-data/SKILL.md` adapts `inspect-data/SKILL.md` under Apache-2.0. Modified to use a new dependency-free bounded inspector, explicit full/prefix coverage, fewer supported formats, no upstream scripts, no installations, and no experiment execution.
+- `workbench-results-report/SKILL.md` adapts `generate-report/SKILL.md` under Apache-2.0. Modified to produce only a reviewed Markdown file at an author-chosen path, without HTML/SVG generation, plotting scripts, remote fonts, input mutation, or new simulations.
+- `workbench-polish/SKILL.md` adapts `expand-writing/SKILL.md`. Its writing guidance also draws on upstream `expand-writing/rules.md`, adapted from [The Elements of Agent Style](https://github.com/yzhao062/agent-style), © Yue Zhao and contributors, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Upstream condensed and reformatted those rules; the workbench further adapts them to selected LaTeX, author-controlled length and audience, and reviewed changes. This entire adapted instruction file is offered under CC BY 4.0. Give appropriate credit, retain the license link, and indicate modifications. This does not imply endorsement by either upstream author.
+
+No upstream executable scripts, remote font assets, or datasets are bundled. The application integration code remains under the repository's Apache-2.0 license. Skill validation does not establish scientific correctness; author review and independent evidence checks remain necessary.

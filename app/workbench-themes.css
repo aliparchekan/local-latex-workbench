@@ -1,0 +1,92 @@
+/* Author-approved Slate blue / Graphite palettes. Remap Primer roles rather
+   than individual components so portaled dialogs share the active theme.
+   Success, warning, danger, and diff tokens deliberately remain independent. */
+[data-color-mode="light"][data-light-theme="light"] {
+  color-scheme: light;
+  --bgColor-default: #f5f7fa;
+  --bgColor-muted: #e8edf2;
+  --bgColor-inset: #e8edf2;
+  --bgColor-neutral-muted: #dce3eb;
+  --bgColor-disabled: #e0e6ee;
+  --fgColor-default: #243247;
+  --fgColor-muted: #526276;
+  --fgColor-neutral: #526276;
+  --fgColor-disabled: #758599;
+  --borderColor-default: #c4ceda;
+  --borderColor-muted: #c4ceda;
+  --borderColor-emphasis: #758599;
+  --borderColor-disabled: #c4ceda;
+  --fgColor-accent: #245baf;
+  --bgColor-accent-emphasis: #245baf;
+  --bgColor-accent-muted: #d9e6f8;
+  --borderColor-accent-emphasis: #245baf;
+  --borderColor-accent-muted: #90afd9;
+  --control-bgColor-rest: #e8edf2;
+  --control-bgColor-hover: #dce3eb;
+  --control-bgColor-active: #cdd8e6;
+  --control-borderColor-rest: #758599;
+  --control-fgColor-rest: #243247;
+  --control-checked-bgColor-hover: #1c4b95;
+  --control-checked-bgColor-active: #153e7e;
+  --control-checked-fgColor-rest: #ffffff;
+  --button-primary-bgColor-rest: #245baf;
+  --button-primary-bgColor-hover: #1c4b95;
+  --button-primary-bgColor-active: #153e7e;
+  --button-primary-bgColor-disabled: #d4deec;
+  --button-primary-fgColor-rest: #ffffff;
+  --button-primary-iconColor-rest: #ffffff;
+  --button-primary-fgColor-disabled: #526276;
+  --button-primary-borderColor-rest: #245baf;
+  --button-primary-borderColor-hover: #1c4b95;
+  --button-primary-borderColor-active: #153e7e;
+  --button-primary-borderColor-disabled: #c4ceda;
+  --button-primary-shadow-selected: inset 0 1px 0 0 #153e7e;
+  --overlay-bgColor: #f5f7fa;
+  --focus-outline-color: #245baf;
+  --focus-outlineColor: #245baf;
+}
+
+[data-color-mode="dark"][data-dark-theme="dark"] {
+  color-scheme: dark;
+  --bgColor-default: #21262e;
+  --bgColor-muted: #15191f;
+  --bgColor-inset: #15191f;
+  --bgColor-neutral-muted: #303946;
+  --bgColor-disabled: #303946;
+  --fgColor-default: #e6edf3;
+  --fgColor-muted: #acb8c7;
+  --fgColor-neutral: #acb8c7;
+  --fgColor-disabled: #788597;
+  --borderColor-default: #46505e;
+  --borderColor-muted: #46505e;
+  --borderColor-emphasis: #6e7d91;
+  --borderColor-disabled: #46505e;
+  --fgColor-accent: #80b4ff;
+  --bgColor-accent-emphasis: #80b4ff;
+  --bgColor-accent-muted: #293f5e;
+  --borderColor-accent-emphasis: #80b4ff;
+  --borderColor-accent-muted: #567baa;
+  --control-bgColor-rest: #21262e;
+  --control-bgColor-hover: #303946;
+  --control-bgColor-active: #394659;
+  --control-borderColor-rest: #6e7d91;
+  --control-fgColor-rest: #e6edf3;
+  --control-checked-bgColor-hover: #9ac4ff;
+  --control-checked-bgColor-active: #b4d3ff;
+  --control-checked-fgColor-rest: #15191f;
+  --button-primary-bgColor-rest: #80b4ff;
+  --button-primary-bgColor-hover: #9ac4ff;
+  --button-primary-bgColor-active: #b4d3ff;
+  --button-primary-bgColor-disabled: #34445a;
+  --button-primary-fgColor-rest: #15191f;
+  --button-primary-iconColor-rest: #15191f;
+  --button-primary-fgColor-disabled: #acb8c7;
+  --button-primary-borderColor-rest: #80b4ff;
+  --button-primary-borderColor-hover: #9ac4ff;
+  --button-primary-borderColor-active: #b4d3ff;
+  --button-primary-borderColor-disabled: #46505e;
+  --button-primary-shadow-selected: inset 0 1px 0 0 #567baa;
+  --overlay-bgColor: #21262e;
+  --focus-outline-color: #80b4ff;
+  --focus-outlineColor: #80b4ff;
+}

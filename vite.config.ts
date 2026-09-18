@@ -1,5 +1,6 @@
 import vinext from "vinext";
 import { defineConfig } from "vite";
+import { createRequire } from "node:module";
 import hostingConfig from "./.openai/hosting.json" with { type: "json" };
 import { sites } from "./build/sites-vite-plugin.ts";
 
@@ -48,6 +49,18 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
+      {
+        name: "primer-server-live-region",
+        enforce: "pre",
+        resolveId(source: string) {
+          // The worker renderer otherwise picks Primer's browser entry, which
+          // extends HTMLElement at import time. Use the package's own SSR entry
+          // on the server; browser announcements keep the real custom element.
+          if (source === "@primer/live-region-element" && this.environment.name !== "client") {
+            return createRequire(import.meta.url).resolve(source);
+          }
+        },
+      },
       vinext(),
       sites(),
       cloudflare({
