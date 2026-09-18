@@ -29,6 +29,10 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
+    "@primer/react": "38.40.0",
+    "@primer/primitives": "11.10.0",
+    "@primer/octicons-react": "19.37.0",
+    "react-is": "19.2.8",
     "concurrently": "^10.0.4",
     "diff": "^9.0.0",
     "lucide-react": "^1.28.0",

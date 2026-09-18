@@ -1,4 +1,5 @@
 import path from "node:path";
+import { PAPER_CHECK_SCHEMA, validatePaperCheck } from "../app/lib/workbench-skills.mjs";
 
 export const AGENT_PROVIDERS = Object.freeze({
   codex: {
@@ -72,7 +73,8 @@ export function rawProviderThreadId(provider, threadId) {
   return value.startsWith(prefix) ? value.slice(prefix.length) : value;
 }
 
-export function proposalInstructions({ researchRoot, paperRoot, userPrompt }) {
+export function proposalInstructions({ researchRoot, paperRoot, userPrompt, readOnly = false, reportKind = "paper-check-v1" }) {
+  const paperCheck = readOnly && reportKind === "paper-check-v1";
   const relativePaper = path.relative(researchRoot, paperRoot) || ".";
   return [
     "You are preparing a proposed edit for Local LaTeX Workbench.",
@@ -82,10 +84,15 @@ export function proposalInstructions({ researchRoot, paperRoot, userPrompt }) {
     "Do not run shell commands, use network access, call MCP tools, or invoke external connectors.",
     "You may read and search files inside the research workspace to understand the paper and supporting code.",
     "Treat an attached source or PDF-mapped selection as the primary target, while allowing the smallest related edits needed for consistency.",
-    "For every proposed edit, return the complete resulting UTF-8 text of that file, not a patch or abbreviated excerpt.",
+    paperCheck
+      ? "This is a read-only paper check. Return the paper-check-v1 report only; no changes, no edit proposals."
+      : readOnly ? "This is a read-only data inspection. Answer in summary and return an empty changes array. No edit proposals."
+        : "For every proposed edit, return the complete resulting UTF-8 text of that file, not a patch or abbreviated excerpt.",
     "Use research-root-relative paths only. Never return absolute paths or paths containing '..'.",
     "Use action 'write' for additions or replacements and action 'delete' only when deletion is essential.",
-    "If no file change is needed, return an empty changes array and answer in summary.",
+    paperCheck
+      ? `Report JSON schema: ${JSON.stringify(PAPER_CHECK_SCHEMA)}`
+      : "If no file change is needed, return an empty changes array and answer in summary.",
     "Return only the requested JSON object, with no Markdown fence or commentary outside it.",
     "",
     "User request:",
@@ -107,7 +114,7 @@ export function providerInvocation(provider, options) {
       "--output-format",
       "json",
       "--json-schema",
-      JSON.stringify(PROPOSAL_SCHEMA),
+      JSON.stringify(options.readOnly && (options.reportKind ?? "paper-check-v1") === "paper-check-v1" ? PAPER_CHECK_SCHEMA : PROPOSAL_SCHEMA),
       "--permission-mode",
       "plan",
       "--tools",
@@ -194,7 +201,7 @@ function validateProposal(value, label) {
   return { summary: value.summary, changes };
 }
 
-export function parseProviderResult(provider, stdout) {
+export function parseProviderResult(provider, stdout, { readOnly = false, reportKind = "paper-check-v1" } = {}) {
   const normalized = normalizeProvider(provider);
   const label = providerName(normalized);
   const envelope = parseJsonText(stdout, label);
@@ -202,8 +209,12 @@ export function parseProviderResult(provider, stdout) {
   const payload = normalized === "claude"
     ? envelope.structured_output ?? parseJsonText(envelope.result, label)
     : parseJsonText(envelope.result, label);
+  const proposal = readOnly && reportKind === "paper-check-v1"
+    ? { summary: JSON.stringify(validatePaperCheck(payload)), changes: [] }
+    : validateProposal(payload, label);
+  if (readOnly && proposal.changes.length) throw new Error("Data inspection is read-only; no changes were applied.");
   return {
     sessionId: rawSessionId == null ? null : String(rawSessionId),
-    proposal: validateProposal(payload, label),
+    proposal,
   };
 }

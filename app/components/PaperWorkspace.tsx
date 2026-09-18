@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { BaseStyles, Button, IconButton, Label, Select, SegmentedControl } from "@primer/react";
+import { ThemeProvider } from "@primer/react/next";
+import { BookIcon, CodeIcon, CommentDiscussionIcon, FileDirectoryIcon, MoonIcon, SunIcon, XIcon } from "@primer/octicons-react";
+import { DEFAULT_PANES, fitPaneLayout, validPaneLayout } from "../lib/pane-layout.mjs";
 import {
   ArrowUp,
   Bot,
@@ -15,8 +19,7 @@ import {
   GitCompareArrows,
   LoaderCircle,
   MessageSquareText,
-  PanelLeftClose,
-  PanelLeftOpen,
+  BookOpen,
   Play,
   RefreshCw,
   RotateCcw,
@@ -27,13 +30,20 @@ import {
 } from "lucide-react";
 import { api, LOCAL_API, relativeTo } from "../lib/api";
 import { mergeAgentMessages } from "../lib/agent-messages.mjs";
+import { usePdfBaseline } from "../lib/pdf-baseline";
 import type { PdfFocus, ProjectInfo, SourceSelection } from "../lib/api";
 import { DiffViewer } from "./DiffViewer";
+import { AutoApproval } from "./AutoApproval";
+import { SkillControls, DEFAULT_SKILL_OPTIONS } from "./SkillControls";
+import type { SkillOptions } from "./SkillControls";
+import { PaperCheckMessage } from "./PaperCheckMessage";
+import { WORKBENCH_SKILLS } from "../lib/workbench-skills.mjs";
 import type { ApprovalReviewFile, ApprovalWriteTarget, PendingApproval } from "./DiffViewer";
 import { FileTree } from "./FileTree";
 import { PdfViewer } from "./PdfViewer";
 import type { PdfSelection } from "./PdfViewer";
 import { ResizeHandle } from "./ResizeHandle";
+import { WorkbenchDialog } from "./WorkbenchDialog";
 import { SourceEditor } from "./SourceEditor";
 import type { SourceFocusRequest } from "./SourceEditor";
 
@@ -48,6 +58,7 @@ type ProviderHealth = {
 
 type Health = {
   ok: boolean;
+  capabilities?: { paperSkills?: boolean; paperSkillsVersion?: number };
   providers?: Partial<Record<AgentProvider, ProviderHealth>>;
   codex?: ProviderHealth;
   claude?: ProviderHealth;
@@ -196,6 +207,7 @@ type ActiveApply = {
   returnContext: ReviewReturnContext | null;
   deadline: number;
   settled: boolean;
+  automatic: boolean;
 };
 
 type ReasoningOption = {
@@ -242,19 +254,7 @@ const effortKey = (root: string, provider: AgentProvider) => provider === "codex
 const modelKey = (root: string, provider: AgentProvider) => provider === "codex"
   ? `lattice:codex-model:${root}`
   : `lattice:model:${provider}:${root}`;
-const PANE_LAYOUT_KEY = "lattice:pane-layout:v1";
-const DEFAULT_PANES = { explorerWidth: 224, agentWidth: 370, sourceRatio: 0.42 };
-const EXPLORER_MIN = 160;
-const EXPLORER_MAX = 420;
-const AGENT_MIN = 280;
-const AGENT_MAX = 600;
-const SOURCE_MIN = 0.25;
-const SOURCE_MAX = 0.75;
-const PANE_HANDLE_SIZE = 7;
-const DOCUMENT_MIN = 500;
-const SOURCE_MIN_PX = 220;
-const PREVIEW_MIN_PX = 260;
-const STACKED_PANE_MIN_PX = 160;
+const PANE_LAYOUT_KEY = "lattice:primer-pane-layout:v1";
 const APPROVAL_REQUEST_TIMEOUT_MS = 15_000;
 const APPLY_POLL_INTERVAL_MS = 750;
 const APPLY_RECOVERY_TIMEOUT_MS = 30_000;
@@ -266,61 +266,6 @@ type PaneLayout = typeof DEFAULT_PANES;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
-}
-
-function validPaneLayout(value: unknown): PaneLayout | null {
-  if (!value || typeof value !== "object") return null;
-  const candidate = value as Partial<PaneLayout>;
-  if (
-    !Number.isFinite(candidate.explorerWidth)
-    || !Number.isFinite(candidate.agentWidth)
-    || !Number.isFinite(candidate.sourceRatio)
-  ) return null;
-  return {
-    explorerWidth: clamp(Number(candidate.explorerWidth), EXPLORER_MIN, EXPLORER_MAX),
-    agentWidth: clamp(Number(candidate.agentWidth), AGENT_MIN, AGENT_MAX),
-    sourceRatio: clamp(Number(candidate.sourceRatio), SOURCE_MIN, SOURCE_MAX),
-  };
-}
-
-function fitOuterPanes(layout: PaneLayout, width: number, explorerOpen: boolean) {
-  let explorerWidth = clamp(layout.explorerWidth, EXPLORER_MIN, EXPLORER_MAX);
-  let agentWidth = clamp(layout.agentWidth, AGENT_MIN, AGENT_MAX);
-  if (!width) return { explorerWidth, agentWidth };
-
-  if (!explorerOpen) {
-    const agentMax = Math.max(
-      AGENT_MIN,
-      Math.min(AGENT_MAX, width - DOCUMENT_MIN - PANE_HANDLE_SIZE),
-    );
-    return { explorerWidth, agentWidth: clamp(agentWidth, AGENT_MIN, agentMax) };
-  }
-
-  const available = Math.max(
-    EXPLORER_MIN + AGENT_MIN,
-    width - DOCUMENT_MIN - PANE_HANDLE_SIZE * 2,
-  );
-  let overflow = explorerWidth + agentWidth - available;
-  if (overflow > 0) {
-    const explorerReduction = Math.min(overflow, explorerWidth - EXPLORER_MIN);
-    explorerWidth -= explorerReduction;
-    overflow -= explorerReduction;
-  }
-  if (overflow > 0) agentWidth = Math.max(AGENT_MIN, agentWidth - overflow);
-  return { explorerWidth, agentWidth };
-}
-
-function sourceRatioBounds(extent: number, stacked: boolean) {
-  if (!extent) return { min: SOURCE_MIN, max: SOURCE_MAX };
-  const sourceMinimum = stacked ? STACKED_PANE_MIN_PX : SOURCE_MIN_PX;
-  const previewMinimum = stacked ? STACKED_PANE_MIN_PX : PREVIEW_MIN_PX;
-  const min = Math.max(SOURCE_MIN, sourceMinimum / extent);
-  const max = Math.min(SOURCE_MAX, (extent - PANE_HANDLE_SIZE - previewMinimum) / extent);
-  if (max < min) {
-    const midpoint = clamp(0.5, SOURCE_MIN, SOURCE_MAX);
-    return { min: midpoint, max: midpoint };
-  }
-  return { min, max };
 }
 
 function nameOf(path: string) {
@@ -446,10 +391,23 @@ export function PaperWorkspace() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [buildId, setBuildId] = useState<string | null>(null);
   const [compiling, setCompiling] = useState(false);
+  const [buildFailed, setBuildFailed] = useState(false);
+  const [preparingPdfBaseline, setPreparingPdfBaseline] = useState(false);
+  const compiledPdfUrlRef = useRef<string | null>(null);
+  const compilingRef = useRef(false);
+  const sendingRef = useRef(false);
+  const { baseline: pdfBaseline, capture: capturePdfBaseline } = usePdfBaseline(
+    JSON.stringify([project?.researchRoot, project?.paperRoot, mainFile, agentProvider]),
+  );
   const [compileErrors, setCompileErrors] = useState<string[]>([]);
   const [compileLog, setCompileLog] = useState("");
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [explorerOpen, setExplorerOpen] = useState(false);
+  const [sourceVisible, setSourceVisible] = useState(true);
+  const [agentVisible, setAgentVisible] = useState(true);
+  const [mobileSurface, setMobileSurface] = useState<"source" | "paper" | "agent">("paper");
+  const [dark, setDark] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [skillOptions, setSkillOptions] = useState<SkillOptions>(DEFAULT_SKILL_OPTIONS);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentStatus, setAgentStatus] = useState("Ready");
@@ -473,8 +431,6 @@ export function PaperWorkspace() {
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(DEFAULT_PANES);
   const [paneLayoutLoaded, setPaneLayoutLoaded] = useState(false);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
-  const [splitExtent, setSplitExtent] = useState(0);
-  const [sourceStacked, setSourceStacked] = useState(false);
   const [outerResizable, setOuterResizable] = useState(true);
   const [activeResize, setActiveResize] = useState<"columns" | "rows" | null>(null);
   const agentName = AGENT_NAMES[agentProvider];
@@ -502,26 +458,35 @@ export function PaperWorkspace() {
   const turnMonitorRef = useRef<TurnMonitor | null>(null);
   const initializedRef = useRef(false);
   const activeApplyRef = useRef<ActiveApply | null>(null);
+  const approvalDecisionInFlightRef = useRef(false);
   const applyPollTimerRef = useRef<number | null>(null);
   const applyStatusInFlightRef = useRef(false);
   const reviewReturnContextRef = useRef<ReviewReturnContext | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const workspaceGridRef = useRef<HTMLDivElement | null>(null);
-  const documentSplitRef = useRef<HTMLDivElement | null>(null);
-  const explorerDragStartRef = useRef(DEFAULT_PANES.explorerWidth);
-  const agentDragStartRef = useRef(DEFAULT_PANES.agentWidth);
-  const sourceDragStartRef = useRef({
-    ratio: DEFAULT_PANES.sourceRatio,
-    extent: 1,
-    min: SOURCE_MIN,
-    max: SOURCE_MAX,
-  });
+  const paneDragStartRef = useRef({ source: 0, agent: 0 });
+  const sourceToggleRef = useRef<HTMLButtonElement>(null);
+  const agentToggleRef = useRef<HTMLButtonElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  const revealWorkingTab = useCallback((tab: "source" | "agent") => {
+    // Desktop panes are independent: revealing source never hides the agent.
+    if (tab === "source") setSourceVisible(true);
+    else setAgentVisible(true);
+    setMobileSurface(tab);
+  }, []);
+
+  const hidePane = (pane: "source" | "agent") => {
+    if (pane === "source") { setSourceVisible(false); sourceToggleRef.current?.focus({ preventScroll: true }); }
+    else { setAgentVisible(false); agentToggleRef.current?.focus({ preventScroll: true }); }
+  };
 
   const replaceProject = useCallback((value: ProjectInfo | null) => {
     projectRef.current = value;
     setProject(value);
     setConfirmedAgentRuntime(null);
+    setSkillOptions(DEFAULT_SKILL_OPTIONS);
   }, []);
 
   const replaceActivePath = useCallback((value: string | null) => {
@@ -544,9 +509,10 @@ export function PaperWorkspace() {
       setSourceFocusRequest(null);
       return;
     }
+    revealWorkingTab("source");
     sourceFocusIdRef.current += 1;
     setSourceFocusRequest({ id: sourceFocusIdRef.current, line });
-  }, []);
+  }, [revealWorkingTab]);
 
   const dirty = activePath !== null && content !== savedContent;
   const activeReadOnly = refreshingAfterApply
@@ -554,9 +520,7 @@ export function PaperWorkspace() {
   const activeReviewFile = pendingApproval?.files?.find(
     (file) => file.path === activePath || (file.movePath != null && file.movePath === activePath),
   ) ?? null;
-  const fittedPanes = fitOuterPanes(paneLayout, workspaceWidth, explorerOpen);
-  const ratioBounds = sourceRatioBounds(splitExtent, sourceStacked);
-  const effectiveSourceRatio = clamp(paneLayout.sourceRatio, ratioBounds.min, ratioBounds.max);
+  const fittedPanes = fitPaneLayout(paneLayout, workspaceWidth, sourceVisible, agentVisible);
   const turnElapsed = turnMonitor ? Math.max(0, turnClock - turnMonitor.startedAt) : 0;
   const turnActive = turnMonitor !== null;
   const turnTakingLong = turnElapsed >= LONG_TURN_WARNING_MS && !pendingApproval;
@@ -594,6 +558,7 @@ export function PaperWorkspace() {
     }
     const timeout = window.setTimeout(() => {
       if (restored) setPaneLayout(restored);
+      try { setDark(localStorage.getItem("lattice:theme") === "dark"); } catch { /* Optional preference. */ }
       setPaneLayoutLoaded(true);
     }, 0);
     return () => window.clearTimeout(timeout);
@@ -612,37 +577,22 @@ export function PaperWorkspace() {
   }, [paneLayout, paneLayoutLoaded]);
 
   useEffect(() => {
-    const stackedQuery = window.matchMedia("(max-width: 820px)");
-    const compactQuery = window.matchMedia("(max-width: 1060px)");
-    const update = () => {
-      setSourceStacked(stackedQuery.matches);
-      setOuterResizable(!compactQuery.matches);
-    };
+    const compactQuery = window.matchMedia("(max-width: 760px)");
+    const update = () => setOuterResizable(!compactQuery.matches);
     update();
-    stackedQuery.addEventListener("change", update);
     compactQuery.addEventListener("change", update);
-    return () => {
-      stackedQuery.removeEventListener("change", update);
-      compactQuery.removeEventListener("change", update);
-    };
+    return () => compactQuery.removeEventListener("change", update);
   }, []);
 
   useEffect(() => {
-    const workspaceNode = workspaceGridRef.current;
-    const splitNode = documentSplitRef.current;
-    if (!workspaceNode || !splitNode) return;
-
-    const measure = () => {
-      setWorkspaceWidth(Math.round(workspaceNode.getBoundingClientRect().width));
-      const splitRect = splitNode.getBoundingClientRect();
-      setSplitExtent(Math.round(sourceStacked ? splitRect.height : splitRect.width));
-    };
+    const node = workspaceGridRef.current;
+    if (!node) return;
+    const measure = () => setWorkspaceWidth(Math.round(node.getBoundingClientRect().width));
     measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(workspaceNode);
-    observer.observe(splitNode);
+    observer.observe(node);
     return () => observer.disconnect();
-  }, [sourceStacked]);
+  }, []);
 
   useEffect(() => {
     if (!turnActive) return;
@@ -742,13 +692,14 @@ export function PaperWorkspace() {
       };
     }
     setPendingApproval(recovered);
+    revealWorkingTab("agent");
     setApplyConfirmationDelayed(false);
     setApplyConfirmationMessage(null);
     if (approvalType === "file" && recovered.files?.[0]) showReviewFile(recovered.files[0]);
     setAgentStatus(approvalType === "permission"
       ? "Waiting for research access approval"
       : "Waiting for your review");
-  }, [activePath, agentName, agentProvider, pendingApproval, selection, showReviewFile, sourceFocusRequest]);
+  }, [activePath, agentName, agentProvider, pendingApproval, selection, showReviewFile, sourceFocusRequest, revealWorkingTab]);
 
   const pollAgentStatus = useCallback(async (targetProject?: ProjectInfo | null) => {
     const statusProject = targetProject ?? project;
@@ -887,7 +838,9 @@ export function PaperWorkspace() {
   }, [openFile, saveNow]);
 
   const compile = useCallback(async (override?: { project?: ProjectInfo; mainFile?: string }) => {
+    if (compilingRef.current) return false;
     if (!(await saveNow())) return false;
+    if (compilingRef.current) return false;
     const targetProject = override?.project ?? project;
     const targetMain = override?.mainFile ?? mainFile;
     if (!targetProject || !targetMain) return false;
@@ -896,6 +849,8 @@ export function PaperWorkspace() {
       setError("Choose a main .tex file from inside the selected paper folder.");
       return false;
     }
+    compilingRef.current = true;
+    compiledPdfUrlRef.current = null;
     setCompiling(true);
     setCompileErrors([]);
     setError(null);
@@ -909,6 +864,7 @@ export function PaperWorkspace() {
         }),
       });
       setCompileLog(result.log ?? "");
+      setBuildFailed(!result.success);
       setCompileErrors((result.errors ?? []).map((entry) => {
         if (typeof entry === "string") return entry;
         const location = [entry.file, entry.line].filter(Boolean).join(":");
@@ -918,15 +874,18 @@ export function PaperWorkspace() {
         const nextBuildId = result.buildId ?? Date.now().toString();
         setBuildId(nextBuildId);
         setPdfUrl(absolutePdfUrl(result.pdfUrl, nextBuildId));
+        if (result.success) compiledPdfUrlRef.current = absolutePdfUrl(result.pdfUrl, nextBuildId);
       }
       if (!result.success && !result.pdfUrl) {
         setError(result.message || "LaTeX could not produce a PDF. Open the build log for details.");
       }
       return result.success;
     } catch (reason) {
+      setBuildFailed(true);
       setError(reason instanceof Error ? reason.message : "Compilation failed");
       return false;
     } finally {
+      compilingRef.current = false;
       setCompiling(false);
     }
   }, [mainFile, project, saveNow]);
@@ -1043,7 +1002,8 @@ export function PaperWorkspace() {
     activeApplyRef.current = null;
     clearApplyPolling();
     applyStatusInFlightRef.current = false;
-    setApprovalBusy(false);
+    // The apply receipt can beat the approval HTTP response. Its caller owns
+    // approvalBusy until that response settles, so the next auto-approval waits.
     setApprovalApplying(false);
     setApplyConfirmationDelayed(false);
     setApplyConfirmationMessage(null);
@@ -1052,6 +1012,13 @@ export function PaperWorkspace() {
     if (settlement.undoAvailable) setCanUndo(true);
     if (settlement.message) setError(settlement.message);
     setAgentStatus(settlement.applied ? "Change applied" : "Change finished");
+    if (activeApply.automatic && settlement.applied) {
+      setMessages(current => [...current, {
+        id: `auto-approval:${activeApply.requestId}`,
+        role: "assistant",
+        text: `Workbench: Auto-approved file changes saved to disk.${settlement.undoAvailable ? " Undo AI edit can restore the latest edit while those files remain unchanged." : ""}`,
+      }]);
+    }
 
     setRefreshingAfterApply(true);
     const changeApplied = settlement.applied;
@@ -1392,6 +1359,7 @@ export function PaperWorkspace() {
       const x = Number(match.h ?? match.x ?? 0);
       const y = Math.max(0, Number(match.v ?? match.y ?? 0) - height);
       if (!Number.isFinite(page) || page < 1) throw new Error("No PDF location was found for this source range.");
+      if (!outerResizable) setMobileSurface("paper");
       setPdfFocus({
         page,
         x,
@@ -1461,9 +1429,33 @@ export function PaperWorkspace() {
   };
 
   const sendToAgent = async (suggestion?: string) => {
-    const message = (suggestion ?? prompt).trim();
-    if (!message || !project || !mainFile || agentBusy || pendingApproval) return;
-    if (!(await saveNow())) return;
+    // Quick suggestions are ordinary chat requests, not an implicit skill run.
+    const skill = suggestion ? null : WORKBENCH_SKILLS.find((entry) => entry.id === skillOptions.id);
+    if (skill && (health?.capabilities?.paperSkillsVersion ?? 0) < 2) {
+      setError("Restart the local companion to enable the new paper skills safely.");
+      return;
+    }
+    const message = (suggestion ?? prompt).trim() || (skill ? `Run ${skill.label}.` : "");
+    if (!message || !project || !mainFile || agentBusy || pendingApproval || compilingRef.current || sendingRef.current) return;
+    if (skill && skillOptions.scope === "selection" && !selection?.text.trim()) {
+      setError("Select LaTeX source or PDF-mapped text before running this skill.");
+      return;
+    }
+    if (skill && skillOptions.scope === "resources" && !skillOptions.resourcePaths?.trim()) {
+      setError("Add the data files to inspect in Skill settings first.");
+      return;
+    }
+    sendingRef.current = true;
+    if (!(await saveNow())) { sendingRef.current = false; return; }
+    setAgentBusy(true);
+    if (!skill?.readOnly && skill?.scope !== "resources") {
+      setPreparingPdfBaseline(true);
+      setAgentStatus("Saving PDF comparison baseline…");
+      // An audit neither compiles nor replaces the last edit's PDF baseline.
+      const baselineCompiled = await compile({ project, mainFile });
+      await capturePdfBaseline(baselineCompiled ? compiledPdfUrlRef.current : null);
+      setPreparingPdfBaseline(false);
+    }
     setPrompt("");
     setError(null);
     setAgentBusy(true);
@@ -1476,7 +1468,9 @@ export function PaperWorkspace() {
     activeAssistantRef.current = assistantId;
     setMessages((current) => [
       ...current,
-      { id: userId, role: "user", text: message },
+      { id: userId, role: "user", text: skill
+        ? `${skill.label} · ${skillOptions.scope === "paper" ? "whole paper" : skillOptions.scope === "resources" ? "local data files" : "selected passage"}\n${message}`
+        : message },
       { id: assistantId, role: "assistant", text: "" },
     ]);
 
@@ -1497,6 +1491,7 @@ export function PaperWorkspace() {
           reasoningEffort,
           prompt: message,
           selection,
+          skill: skill ? skillOptions : null,
         }),
         signal: controller.signal,
       });
@@ -1567,6 +1562,7 @@ export function PaperWorkspace() {
           activePresentedApproval = { id: String(event.requestId), approvalType };
           setApplyConfirmationDelayed(false);
           setApplyConfirmationMessage(null);
+          revealWorkingTab("agent");
           setPendingApproval({
             id: event.requestId,
             provider: event.provider ?? agentProvider,
@@ -1696,14 +1692,17 @@ export function PaperWorkspace() {
         setError(reason instanceof Error ? reason.message : `${agentName} request failed`);
       }
     } finally {
+      sendingRef.current = false;
       streamAbortRef.current = null;
       activeAssistantRef.current = null;
       setAgentBusy(turnMonitorRef.current !== null);
     }
   };
 
-  const decideApproval = async (decision: "accept" | "decline" | "cancel") => {
-    if (!pendingApproval || !project) return;
+  const decideApproval = async (decision: "accept" | "decline" | "cancel", automatic = false): Promise<boolean> => {
+    if (!pendingApproval || !project || approvalDecisionInFlightRef.current || activeApplyRef.current) return false;
+    if (automatic && (decision !== "accept" || pendingApproval.approvalType !== "file")) return false;
+    approvalDecisionInFlightRef.current = true;
     const approval = pendingApproval;
     const permissionApproval = approval.approvalType === "permission";
     const returnContext = reviewReturnContextRef.current;
@@ -1720,12 +1719,13 @@ export function PaperWorkspace() {
         returnContext,
         deadline: Date.now() + APPLY_RECOVERY_TIMEOUT_MS,
         settled: false,
+        automatic,
       };
       activeApplyRef.current = activeApply;
       setApprovalApplying(true);
       setApplyConfirmationDelayed(false);
       setApplyConfirmationMessage(null);
-      setAgentStatus("Approving change…");
+      setAgentStatus(automatic ? "Auto-approving change…" : "Approving change…");
     } else if (permissionApproval) {
       setAgentStatus(decision === "accept"
         ? "Allowing research access for this turn…"
@@ -1765,9 +1765,9 @@ export function PaperWorkspace() {
           });
         }
       } else if (decision === "accept") {
-        if (!activeApply || activeApplyRef.current !== activeApply || activeApply.settled) return;
+        if (!activeApply || activeApplyRef.current !== activeApply || activeApply.settled) return true;
         activeApply.snapshotId = result.snapshotId ?? null;
-        setAgentStatus("Applying approved change…");
+        setAgentStatus(automatic ? "Applying auto-approved change…" : "Applying approved change…");
         if (activeApply.snapshotId) {
           startApplyPolling(activeApply);
         } else {
@@ -1779,6 +1779,7 @@ export function PaperWorkspace() {
         setAgentStatus("Change declined");
         await restoreReviewContext(project, returnContext);
       }
+      return true;
     } catch (reason) {
       const approvalTimedOut = decision === "accept"
         && reason instanceof DOMException
@@ -1806,8 +1807,10 @@ export function PaperWorkspace() {
       if (!approvalTimedOut) {
         setError(reason instanceof Error ? reason.message : "Could not send your decision");
       }
+      return false;
     } finally {
       window.clearTimeout(timeout);
+      approvalDecisionInFlightRef.current = false;
       setApprovalBusy(false);
     }
   };
@@ -1882,81 +1885,24 @@ export function PaperWorkspace() {
     }
   };
 
-  const explorerMaximum = workspaceWidth
-    ? Math.max(
-        EXPLORER_MIN,
-        Math.min(
-          EXPLORER_MAX,
-          workspaceWidth - fittedPanes.agentWidth - DOCUMENT_MIN - PANE_HANDLE_SIZE * 2,
-        ),
-      )
-    : EXPLORER_MAX;
-  const agentMaximum = workspaceWidth
-    ? Math.max(
-        AGENT_MIN,
-        Math.min(
-          AGENT_MAX,
-          workspaceWidth
-            - (explorerOpen ? fittedPanes.explorerWidth + PANE_HANDLE_SIZE * 2 : PANE_HANDLE_SIZE)
-            - DOCUMENT_MIN,
-        ),
-      )
-    : AGENT_MAX;
-
-  const startExplorerResize = () => {
-    explorerDragStartRef.current = fittedPanes.explorerWidth;
-    setActiveResize("columns");
+  const resizePane = (pane: "source" | "agent", pixels: number) => {
+    const maximum = pane === "source" ? fittedPanes.sourceMax : fittedPanes.agentMax;
+    const percent = clamp(pixels, fittedPanes.minimum, maximum) / (workspaceWidth || 1440) * 100;
+    setPaneLayout(current => ({ ...current, [pane]: percent }));
   };
-  const resizeExplorer = (delta: number) => {
-    const explorerWidth = clamp(explorerDragStartRef.current + delta, EXPLORER_MIN, explorerMaximum);
-    setPaneLayout((current) => ({ ...current, explorerWidth }));
-  };
-  const nudgeExplorer = (delta: number) => {
-    const explorerWidth = clamp(fittedPanes.explorerWidth + delta, EXPLORER_MIN, explorerMaximum);
-    setPaneLayout((current) => ({ ...current, explorerWidth }));
-  };
-
-  const startAgentResize = () => {
-    agentDragStartRef.current = fittedPanes.agentWidth;
-    setActiveResize("columns");
-  };
-  const resizeAgent = (delta: number) => {
-    const agentWidth = clamp(agentDragStartRef.current - delta, AGENT_MIN, agentMaximum);
-    setPaneLayout((current) => ({ ...current, agentWidth }));
-  };
-  const nudgeAgent = (delta: number) => {
-    const agentWidth = clamp(fittedPanes.agentWidth - delta, AGENT_MIN, agentMaximum);
-    setPaneLayout((current) => ({ ...current, agentWidth }));
-  };
-
-  const startSourceResize = () => {
-    sourceDragStartRef.current = {
-      ratio: effectiveSourceRatio,
-      extent: Math.max(1, splitExtent),
-      min: ratioBounds.min,
-      max: ratioBounds.max,
-    };
-    setActiveResize(sourceStacked ? "rows" : "columns");
-  };
-  const resizeSource = (delta: number) => {
-    const start = sourceDragStartRef.current;
-    const sourceRatio = clamp(start.ratio + delta / start.extent, start.min, start.max);
-    setPaneLayout((current) => ({ ...current, sourceRatio }));
-  };
-  const nudgeSource = (delta: number) => {
-    const sourceRatio = clamp(
-      effectiveSourceRatio + delta / Math.max(1, splitExtent),
-      ratioBounds.min,
-      ratioBounds.max,
-    );
-    setPaneLayout((current) => ({ ...current, sourceRatio }));
-  };
-
-  const paneStyles = {
-    "--explorer-width": `${fittedPanes.explorerWidth}px`,
-    "--agent-width": `${fittedPanes.agentWidth}px`,
-    "--source-share": `${effectiveSourceRatio * 100}%`,
-  } as CSSProperties;
+  const paneHandle = (pane: "source" | "agent") => <ResizeHandle
+    className={`${pane}-resizer`} orientation="vertical" label={`Resize ${pane} pane`}
+    controls={pane === "source" ? "source-tool-panel document-pane" : "document-pane codex-pane"}
+    value={fittedPanes[pane]} min={fittedPanes.minimum} max={pane === "source" ? fittedPanes.sourceMax : fittedPanes.agentMax}
+    valueText={`${Math.round(fittedPanes[pane])} pixels wide`} disabled={!outerResizable || !(pane === "source" ? sourceVisible : agentVisible)}
+    onDragStart={() => { paneDragStartRef.current = fittedPanes; setActiveResize("columns"); }}
+    onDrag={delta => resizePane(pane, paneDragStartRef.current[pane] + (pane === "source" ? delta : -delta))}
+    onDragEnd={() => setActiveResize(null)}
+    onNudge={delta => resizePane(pane, fittedPanes[pane] + (pane === "source" ? delta : -delta))}
+    onBoundary={boundary => resizePane(pane, boundary === "min" ? fittedPanes.minimum : pane === "source" ? fittedPanes.sourceMax : fittedPanes.agentMax)}
+    onReset={() => setPaneLayout(current => ({ ...current, [pane]: DEFAULT_PANES[pane] }))}
+  />;
+  const paneStyles = { "--source-width": `${fittedPanes.source}px`, "--agent-width": `${fittedPanes.agent}px` } as CSSProperties;
 
   const selectedLabel = selection
     ? `${nameOf(selection.path)} · L${selection.startLine}${selection.endLine !== selection.startLine ? `–${selection.endLine}` : ""}`
@@ -1994,31 +1940,67 @@ export function PaperWorkspace() {
   })();
 
   return (
+    <ThemeProvider colorMode={dark ? "dark" : "light"}><BaseStyles>
     <main
-      className={`lattice-app ${explorerOpen ? "" : "explorer-collapsed"} ${activeResize ? `resizing-${activeResize}` : ""}`}
+      className={`lattice-app primer-workbench ${sourceVisible ? "" : "source-collapsed"} ${agentVisible ? "" : "agent-collapsed"} mobile-${mobileSurface} ${activeResize ? `resizing-${activeResize}` : ""}`}
       style={paneStyles}
     >
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark"><span /></span>
-          <div><strong>Local LaTeX Workbench</strong><small>local paper studio</small></div>
+          <BookIcon size={22} />
+          <strong>Local LaTeX Workbench</strong>
         </div>
 
-        <button className="workspace-picker" onClick={chooseWorkspace} disabled={agentBusy || Boolean(pendingApproval)}>
-          <FolderOpen size={15} />
-          <span>
-            <small>Research workspace</small>
-            <strong>{project ? nameOf(project.researchRoot) : "Choose a folder"}</strong>
-          </span>
-          <ChevronDown size={14} />
-        </button>
+        <Button variant="invisible" className="workspace-picker" onClick={chooseWorkspace} disabled={agentBusy || Boolean(pendingApproval)}
+          aria-label="Choose research workspace" title={project?.researchRoot ?? "Choose a research folder"} trailingVisual={ChevronDown}>
+          {project ? nameOf(project.researchRoot) : "Choose a folder"}
+        </Button>
+
 
         <div className="topbar-spacer" />
+        <Button className="desk-files-button" leadingVisual={FileDirectoryIcon} onClick={() => setExplorerOpen(true)} aria-haspopup="dialog" aria-label="Paper files">Files</Button>
+        <div className="desktop-pane-toggles">
+          <Button ref={sourceToggleRef} variant="invisible" leadingVisual={CodeIcon} aria-pressed={sourceVisible} aria-controls="source-tool-panel" onClick={() => setSourceVisible(value => !value)}>Source</Button>
+          <Button ref={agentToggleRef} variant="invisible" leadingVisual={CommentDiscussionIcon} aria-pressed={agentVisible} aria-controls="codex-pane" onClick={() => setAgentVisible(value => !value)}>Agent</Button>
+        </div>
+        <span className={`connection-pill ${providerHealth?.authenticated ? "connected" : ""}`} title={providerHealth?.label}>
+          <span /> {health === null ? "Connecting" : providerHealth?.authenticated ? `${agentName} subscription` : `${agentName} offline`}
+        </span>
 
+
+        {canUndo ? <IconButton icon={RotateCcw} aria-label="Undo last AI edit" onClick={undoLastChange} /> : null}
+        <IconButton variant="invisible" icon={dark ? SunIcon : MoonIcon} aria-label={dark ? "Use light theme" : "Use dark theme"} onClick={() => {
+          setDark(!dark); try { localStorage.setItem("lattice:theme", dark ? "light" : "dark"); } catch { /* Optional preference. */ }
+        }} />
+        <Button className="compile-button" variant="primary" onClick={() => compile()} disabled={!mainFile || compiling || preparingPdfBaseline}>
+          {compiling ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
+          {compiling ? "Compiling" : "Compile"}
+        </Button>
+      </header>
+
+      <nav className="mobile-workspace-nav" aria-label="Workspace views">
+        <SegmentedControl aria-label="Workspace view" fullWidth onChange={index => setMobileSurface((["source", "paper", "agent"] as const)[index])}>
+          <SegmentedControl.Button selected={mobileSurface === "source"}>Source</SegmentedControl.Button>
+          <SegmentedControl.Button selected={mobileSurface === "paper"}>Paper</SegmentedControl.Button>
+          <SegmentedControl.Button selected={mobileSurface === "agent"}>{pendingApproval ? "Agent · Review" : "Agent"}</SegmentedControl.Button>
+        </SegmentedControl>
+      </nav>
+
+      {error ? (
+        <div className="error-banner" role="alert">
+          <CircleAlert size={15} /> <span>{error}</span>
+          <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
+        </div>
+      ) : null}
+
+      <div ref={workspaceGridRef} className="workspace-grid">
+        <section id="document-pane" className="document-workspace" aria-label="Paper canvas">
+          <div className="paper-toolbar">
+            <div className="paper-heading"><BookOpen size={18} /><strong>{project ? nameOf(project.paperRoot) : "Your paper"}</strong></div>
         {project ? (
           <label className="main-file-picker">
             <span>Main</span>
-            <select
+            <Select
               value={mainFile ?? ""}
               disabled={agentBusy || Boolean(pendingApproval)}
               onChange={async (event) => {
@@ -2035,189 +2017,49 @@ export function PaperWorkspace() {
               }}
             >
               {mainOptions.map((path) => <option key={path}>{path}</option>)}
-            </select>
+            </Select>
           </label>
         ) : null}
 
-        <label className="reasoning-picker" title="Choose which local subscription-backed agent to use">
-          <Bot size={13} />
-          <span>Agent</span>
-          <select
-            value={agentProvider}
-            disabled={agentBusy || Boolean(pendingApproval)}
-            onChange={(event) => {
-              const next = event.target.value as AgentProvider;
-              setAgentProvider(next);
-              localStorage.setItem(AGENT_PROVIDER_KEY, next);
-              setAgentSettings(null);
-              setSelectedModel("");
-              setReasoningEffort("");
-              setConfirmedAgentRuntime(null);
-              setMessages([]);
-              setLatestDiff("");
-              setAgentStatus("Ready");
-              setError(null);
-            }}
-            aria-label="AI agent provider"
-          >
-            <option value="codex">Codex</option>
-            <option value="claude">Claude Code</option>
-            <option value="cursor">Cursor Agent</option>
-          </select>
-        </label>
 
-        {project && agentProvider !== "cursor" ? (
-          <label
-            className="reasoning-picker"
-            title={selectedModelSettings?.description || `Choose a model advertised by your signed-in ${agentName} subscription`}
-          >
-            <Cpu size={13} />
-            <span>Model</span>
-            <select
-              value={selectedModel}
-              disabled={agentBusy || Boolean(pendingApproval) || !agentSettings?.models?.length}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedModel(value);
-                if (value) localStorage.setItem(modelKey(project.researchRoot, agentProvider), value);
-                else localStorage.removeItem(modelKey(project.researchRoot, agentProvider));
-                const nextSettings = agentSettings?.models?.find((model) => model.model === value);
-                if (
-                  reasoningEffort
-                  && !nextSettings?.supportedReasoningEfforts.some(
-                    (option) => option.reasoningEffort === reasoningEffort,
-                  )
-                ) {
-                  setReasoningEffort("");
-                  localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
-                }
-              }}
-              aria-label={`${agentName} model`}
-            >
-              {agentSettings?.models?.length ? agentSettings.models.map((model) => (
-                <option key={model.model} value={model.model}>
-                  {modelOptionLabel(model)}
-                </option>
-              )) : (
-                <option value="">Models unavailable</option>
-              )}
-            </select>
-          </label>
-        ) : null}
-
-        {project ? (
-          <label
-            className="reasoning-picker"
-            title={intelligenceSettings?.displayName
-              ? `Reasoning effort for ${intelligenceSettings.displayName}`
-              : `${agentName} reasoning effort`}
-          >
-            <Sparkles size={13} />
-            <span>Intelligence</span>
-            <select
-              value={reasoningEffort}
-              disabled={agentBusy || Boolean(pendingApproval)}
-              onChange={(event) => {
-                const value = event.target.value;
-                setReasoningEffort(value);
-                if (value) localStorage.setItem(effortKey(project.researchRoot, agentProvider), value);
-                else localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
-              }}
-              aria-label={`${agentName} intelligence level`}
-            >
-              <option value="">
-                {intelligenceSettings?.defaultReasoningEffort
-                  ? `Default · ${effortLabel(intelligenceSettings.defaultReasoningEffort)}`
-                  : "Default"}
-              </option>
-              {intelligenceSettings?.supportedReasoningEfforts.map((option) => (
-                <option key={option.reasoningEffort} value={option.reasoningEffort}>
-                  {effortLabel(option.reasoningEffort)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-
-        <span className={`connection-pill ${providerHealth?.authenticated ? "connected" : ""}`} title={providerHealth?.label}>
-          <span /> {health === null ? "Connecting" : providerHealth?.authenticated ? `${agentName} subscription` : `${agentName} offline`}
-        </span>
-
-        <button className="button compile-button" onClick={() => compile()} disabled={!mainFile || compiling}>
-          {compiling ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
-          {compiling ? "Compiling" : "Compile"}
-        </button>
-      </header>
-
-      {error ? (
-        <div className="error-banner" role="alert">
-          <CircleAlert size={15} /> <span>{error}</span>
-          <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button>
-        </div>
-      ) : null}
-
-      <div ref={workspaceGridRef} className="workspace-grid">
-        <aside id="paper-files-pane" className="explorer-panel">
-          <div className="panel-title explorer-title">
-            <div><span className="eyebrow">Project</span><strong>Paper files</strong></div>
-            <button onClick={() => setExplorerOpen(false)} aria-label="Close file explorer"><PanelLeftClose size={16} /></button>
+            <Label variant="secondary" className="paper-format">PDF</Label>
           </div>
-          {project ? (
-            <button className="paper-root-card" onClick={choosePaperFolder} disabled={agentBusy || Boolean(pendingApproval)}>
-              <span className="paper-root-icon"><FileCode2 size={15} /></span>
-              <span>
-                <small>Paper folder · local destination</small>
-                <strong title={project.paperRoot}>{project.paperRoot}</strong>
-              </span>
-              <RefreshCw size={12} />
+            <section id="preview-pane" className="preview-pane">
+              <div className="pane-label">
+                <span>Rendered paper</span>
+                <small>select text to reveal its source</small>
+              </div>
+              <PdfViewer
+                key={project && mainFile
+                  ? `${project.researchRoot}\n${project.paperRoot}\n${mainFile}`
+                  : "no-paper-preview"}
+                url={pdfUrl}
+                buildId={buildId}
+                focus={pdfFocus}
+                compiling={compiling}
+                baseline={pdfBaseline}
+                buildFailed={buildFailed}
+                onSelect={handlePdfSelection}
+              />
+            </section>
+
+          <footer className="build-status">
+            <button onClick={() => setLogOpen((value) => !value)} disabled={!compileLog}>
+              <span className={`build-dot ${compileErrors.length ? "warning" : pdfUrl ? "success" : "idle"}`} />
+              {compiling ? "Building…" : compileErrors.length ? `${compileErrors.length} LaTeX ${compileErrors.length === 1 ? "issue" : "issues"}` : pdfUrl ? "Build is current" : "No build yet"}
+              {compileLog ? <ChevronDown size={12} className={logOpen ? "rotated" : ""} /> : null}
             </button>
-          ) : null}
-          <FileTree
-            nodes={project?.tree ?? []}
-            activePath={activePath}
-            paperRoot={project ? relativeTo(project.researchRoot, project.paperRoot) : null}
-            onOpen={(path) => {
-              if ((approvalApplying || applyConfirmationDelayed) && pendingApproval) {
-                const reviewFile = pendingApproval.files?.find((file) => file.path === path);
-                if (reviewFile) showReviewFile(reviewFile);
-                return;
-              }
-              void openFileAfterSave(path);
-            }}
-          />
-        </aside>
+            <span>{selection ? `${selection.origin === "pdf" ? "PDF mapped to" : "Selected"} ${selectedLabel}` : `Select source or rendered text to focus ${agentName}`}</span>
+          </footer>
+          {logOpen ? <pre className="compile-log">{compileErrors.join("\n") || compileLog}</pre> : null}
 
-        <ResizeHandle
-          className="explorer-resizer"
-          orientation="vertical"
-          label="Resize paper files panel"
-          controls="paper-files-pane document-pane"
-          value={fittedPanes.explorerWidth}
-          min={EXPLORER_MIN}
-          max={explorerMaximum}
-          valueText={`${Math.round(fittedPanes.explorerWidth)} pixels wide`}
-          disabled={!outerResizable || !explorerOpen}
-          onDragStart={startExplorerResize}
-          onDrag={resizeExplorer}
-          onDragEnd={() => setActiveResize(null)}
-          onNudge={nudgeExplorer}
-          onBoundary={(boundary) => {
-            const explorerWidth = boundary === "min" ? EXPLORER_MIN : explorerMaximum;
-            setPaneLayout((current) => ({ ...current, explorerWidth }));
-          }}
-          onReset={() => setPaneLayout((current) => ({
-            ...current,
-            explorerWidth: clamp(DEFAULT_PANES.explorerWidth, EXPLORER_MIN, explorerMaximum),
-          }))}
-        />
+        </section>
 
-        {!explorerOpen ? (
-          <button className="explorer-restore" onClick={() => setExplorerOpen(true)} aria-label="Open file explorer">
-            <PanelLeftOpen size={16} />
-          </button>
-        ) : null}
-
-        <section id="document-pane" className="document-workspace">
+        {paneHandle("source")}
+          <section id="source-tool-panel" className="source-tool-panel" aria-label="LaTeX source">
+          <div className="workspace-pane-heading"><CodeIcon /><strong>Source</strong><Label variant="secondary">LaTeX</Label>
+            <IconButton className="pane-close" icon={XIcon} variant="invisible" size="small" aria-label="Hide source" onClick={() => hidePane("source")} />
+          </div>
           <div className="document-toolbar">
             <div className="document-tab" title={activeSourceDiskPath ?? undefined}>
               <FileCode2 size={14} />
@@ -2277,12 +2119,9 @@ export function PaperWorkspace() {
                 {savePresentation.detail ? <small>· {savePresentation.detail}</small> : null}
               </button>
             ) : null}
-            {canUndo ? (
-              <button className="toolbar-button" onClick={undoLastChange}><RotateCcw size={13} /> Undo AI edit</button>
-            ) : null}
           </div>
 
-          <div ref={documentSplitRef} className="document-split">
+
             <section id="source-pane" className="source-pane">
               <div className="pane-label">
                 <span>{activeReviewFile ? "Source review" : "LaTeX source"}</span>
@@ -2299,86 +2138,21 @@ export function PaperWorkspace() {
                 onLocatePdf={locateSourceInPdf}
               />
             </section>
-            <ResizeHandle
-              className="source-preview-resizer"
-              orientation={sourceStacked ? "horizontal" : "vertical"}
-              label="Resize source and rendered paper"
-              controls="source-pane preview-pane"
-              value={effectiveSourceRatio * 100}
-              min={ratioBounds.min * 100}
-              max={ratioBounds.max * 100}
-              valueText={`${Math.round(effectiveSourceRatio * 100)} percent source`}
-              onDragStart={startSourceResize}
-              onDrag={resizeSource}
-              onDragEnd={() => setActiveResize(null)}
-              onNudge={nudgeSource}
-              onBoundary={(boundary) => {
-                const sourceRatio = boundary === "min" ? ratioBounds.min : ratioBounds.max;
-                setPaneLayout((current) => ({ ...current, sourceRatio }));
-              }}
-              onReset={() => setPaneLayout((current) => ({
-                ...current,
-                sourceRatio: clamp(DEFAULT_PANES.sourceRatio, ratioBounds.min, ratioBounds.max),
-              }))}
-            />
-            <section id="preview-pane" className="preview-pane">
-              <div className="pane-label">
-                <span>Rendered paper</span>
-                <small>select text to reveal its source</small>
-              </div>
-              <PdfViewer
-                key={project && mainFile
-                  ? `${project.researchRoot}\n${project.paperRoot}\n${mainFile}`
-                  : "no-paper-preview"}
-                url={pdfUrl}
-                buildId={buildId}
-                focus={pdfFocus}
-                compiling={compiling}
-                onSelect={handlePdfSelection}
-              />
-            </section>
+
+            <footer className="source-context-actions">
+              <span>{selectedLabel ? `Selected: ${selectedLabel}` : "Select a passage to give your agent context."}</span>
+              <Button size="small" onClick={() => { revealWorkingTab("agent"); requestAnimationFrame(() => composerRef.current?.focus()); }}>{pendingApproval ? "Review changes" : "Ask agent"}</Button>
+            </footer>
+          </section>
+        {paneHandle("agent")}
+        <section id="codex-pane" className="agent-panel" aria-label="Agent conversation">
+          <div className="workspace-pane-heading"><CommentDiscussionIcon /><strong>Agent</strong>
+            {pendingApproval ? <Label variant="attention">Review</Label> : null}
+            <IconButton className="pane-close" icon={XIcon} variant="invisible" size="small" aria-label="Hide agent" onClick={() => hidePane("agent")} />
           </div>
-
-          <footer className="build-status">
-            <button onClick={() => setLogOpen((value) => !value)} disabled={!compileLog}>
-              <span className={`build-dot ${compileErrors.length ? "warning" : pdfUrl ? "success" : "idle"}`} />
-              {compiling ? "Building…" : compileErrors.length ? `${compileErrors.length} LaTeX ${compileErrors.length === 1 ? "issue" : "issues"}` : pdfUrl ? "Build is current" : "No build yet"}
-              {compileLog ? <ChevronDown size={12} className={logOpen ? "rotated" : ""} /> : null}
-            </button>
-            <span>{selection ? `${selection.origin === "pdf" ? "PDF mapped to" : "Selected"} ${selectedLabel}` : `Select source or rendered text to focus ${agentName}`}</span>
-          </footer>
-          {logOpen ? <pre className="compile-log">{compileErrors.join("\n") || compileLog}</pre> : null}
-        </section>
-
-        <ResizeHandle
-          className="agent-resizer"
-          orientation="vertical"
-          label={`Resize ${agentName} panel`}
-          controls="document-pane codex-pane"
-          value={fittedPanes.agentWidth}
-          min={AGENT_MIN}
-          max={agentMaximum}
-          valueText={`${Math.round(fittedPanes.agentWidth)} pixels wide`}
-          disabled={!outerResizable}
-          onDragStart={startAgentResize}
-          onDrag={resizeAgent}
-          onDragEnd={() => setActiveResize(null)}
-          onNudge={nudgeAgent}
-          onBoundary={(boundary) => {
-            const agentWidth = boundary === "min" ? AGENT_MIN : agentMaximum;
-            setPaneLayout((current) => ({ ...current, agentWidth }));
-          }}
-          onReset={() => setPaneLayout((current) => ({
-            ...current,
-            agentWidth: clamp(DEFAULT_PANES.agentWidth, AGENT_MIN, agentMaximum),
-          }))}
-        />
-
-        <aside id="codex-pane" className="agent-panel">
           <div className="agent-header">
             <div className="agent-avatar"><Sparkles size={17} /></div>
             <div>
-              <span className="eyebrow">Your local agent</span>
               <strong>{agentName}</strong>
               {confirmedRuntimeLabel ? (
                 <small
@@ -2392,6 +2166,109 @@ export function PaperWorkspace() {
               ) : null}
             </div>
             <span className={`agent-status ${agentBusy || turnActive ? "busy" : ""}`}>{agentStatus}</span>
+          </div>
+
+          <div className="agent-controls" aria-label="Agent configuration">
+        <label className="reasoning-picker" title="Choose which local subscription-backed agent to use">
+          <Bot size={13} />
+          <span>Agent</span>
+          <Select
+            value={agentProvider}
+            disabled={agentBusy || Boolean(pendingApproval)}
+            onChange={(event) => {
+              const next = event.target.value as AgentProvider;
+              setAgentProvider(next);
+              localStorage.setItem(AGENT_PROVIDER_KEY, next);
+              setAgentSettings(null);
+              setSelectedModel("");
+              setReasoningEffort("");
+              setConfirmedAgentRuntime(null);
+              setMessages([]);
+              setLatestDiff("");
+              setAgentStatus("Ready");
+              setError(null);
+            }}
+            aria-label="AI agent provider"
+          >
+            <option value="codex">Codex</option>
+            <option value="claude">Claude Code</option>
+            <option value="cursor">Cursor Agent</option>
+          </Select>
+        </label>
+
+        {project && agentProvider !== "cursor" ? (
+          <label
+            className="reasoning-picker"
+            title={selectedModelSettings?.description || `Choose a model advertised by your signed-in ${agentName} subscription`}
+          >
+            <Cpu size={13} />
+            <span>Model</span>
+            <Select
+              value={selectedModel}
+              disabled={agentBusy || Boolean(pendingApproval) || !agentSettings?.models?.length}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedModel(value);
+                if (value) localStorage.setItem(modelKey(project.researchRoot, agentProvider), value);
+                else localStorage.removeItem(modelKey(project.researchRoot, agentProvider));
+                const nextSettings = agentSettings?.models?.find((model) => model.model === value);
+                if (
+                  reasoningEffort
+                  && !nextSettings?.supportedReasoningEfforts.some(
+                    (option) => option.reasoningEffort === reasoningEffort,
+                  )
+                ) {
+                  setReasoningEffort("");
+                  localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
+                }
+              }}
+              aria-label={`${agentName} model`}
+            >
+              {agentSettings?.models?.length ? agentSettings.models.map((model) => (
+                <option key={model.model} value={model.model}>
+                  {modelOptionLabel(model)}
+                </option>
+              )) : (
+                <option value="">Models unavailable</option>
+              )}
+            </Select>
+          </label>
+        ) : null}
+
+        {project ? (
+          <label
+            className="reasoning-picker"
+            title={intelligenceSettings?.displayName
+              ? `Reasoning effort for ${intelligenceSettings.displayName}`
+              : `${agentName} reasoning effort`}
+          >
+            <Sparkles size={13} />
+            <span>Intelligence</span>
+            <Select
+              value={reasoningEffort}
+              disabled={agentBusy || Boolean(pendingApproval)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setReasoningEffort(value);
+                if (value) localStorage.setItem(effortKey(project.researchRoot, agentProvider), value);
+                else localStorage.removeItem(effortKey(project.researchRoot, agentProvider));
+              }}
+              aria-label={`${agentName} intelligence level`}
+            >
+              <option value="">
+                {intelligenceSettings?.defaultReasoningEffort
+                  ? `Default · ${effortLabel(intelligenceSettings.defaultReasoningEffort)}`
+                  : "Default"}
+              </option>
+              {intelligenceSettings?.supportedReasoningEfforts.map((option) => (
+                <option key={option.reasoningEffort} value={option.reasoningEffort}>
+                  {effortLabel(option.reasoningEffort)}
+                </option>
+              ))}
+            </Select>
+          </label>
+        ) : null}
+
           </div>
 
           {turnMonitor ? (
@@ -2420,6 +2297,14 @@ export function PaperWorkspace() {
             </div>
           ) : null}
 
+          <AutoApproval
+            key={JSON.stringify([project?.researchRoot, project?.paperRoot, mainFile, agentProvider])}
+            approval={pendingApproval}
+            busy={approvalBusy || approvalApplying || applyConfirmationDelayed || refreshingAfterApply || stoppingTurn}
+            disabled={!project}
+            onApprove={() => decideApproval("accept", true)}
+          />
+
           {pendingApproval ? (
             <DiffViewer
               approval={pendingApproval}
@@ -2432,7 +2317,7 @@ export function PaperWorkspace() {
               onCheckStatus={() => { void checkApplyStatus(true); }}
               onOpenFile={(path) => {
                 const file = pendingApproval.files?.find((candidate) => candidate.path === path);
-                if (file) showReviewFile(file);
+                if (file) { showReviewFile(file); revealWorkingTab("source"); }
               }}
             />
           ) : (
@@ -2445,8 +2330,8 @@ export function PaperWorkspace() {
                     <p>
                       {agentName} can read the paper, equations, figures, references, and the code around them.
                       {agentProvider === "codex"
-                        ? " Source edits wait for your approval. To rerun code or generate non-paper outputs, Codex may ask for turn-only access to the smallest research-output folder it needs; command network access stays off."
-                        : ` ${agentName} runs in proposal-only mode: it cannot write or run commands, and every source edit waits for your approval.`}
+                        ? " Source edits wait for your approval unless you enable Auto-approve edits. To rerun code or generate non-paper outputs, Codex may ask for turn-only access to the smallest research-output folder it needs; command network access stays off."
+                        : ` ${agentName} runs in proposal-only mode: it cannot write or run commands. The workbench applies its proposals after manual approval, or automatically when Auto-approve edits is on.`}
                     </p>
                     <div className="suggestion-list">
                       {[
@@ -2463,7 +2348,15 @@ export function PaperWorkspace() {
                 ) : messages.map((message) => (
                   <article className={`chat-message ${message.role}`} key={message.id}>
                     <span>{message.role === "assistant" ? <Bot size={13} /> : "You"}</span>
-                    <p>{message.text || (agentBusy && message.role === "assistant" ? "Thinking…" : "")}</p>
+                    {message.role === "assistant" ? <PaperCheckMessage
+                      text={message.text}
+                      busy={agentBusy}
+                      onOpenSource={(path, line) => {
+                        void openFileAfterSave(path).then((opened) => {
+                          if (opened !== null) { setSelection(null); focusSourceLine(line); }
+                        }).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not open finding source"));
+                      }}
+                    /> : <p>{message.text}</p>}
                   </article>
                 ))}
                 {latestDiff && !pendingApproval && agentBusy ? (
@@ -2472,6 +2365,14 @@ export function PaperWorkspace() {
               </div>
 
               <div className="composer-wrap">
+                <SkillControls key={JSON.stringify([project?.researchRoot, project?.paperRoot])}
+                  settingsKey={JSON.stringify([project?.researchRoot, project?.paperRoot])}
+                  value={skillOptions} onChange={setSkillOptions}
+                  disabled={!project || agentBusy || compiling || (health?.capabilities?.paperSkillsVersion ?? 0) < 2}
+                  hasSelection={Boolean(selection?.text.trim())} />
+                {project && health?.ok && (health.capabilities?.paperSkillsVersion ?? 0) < 2 ? (
+                  <p className="skill-description">Restart the local companion to enable paper skills.</p>
+                ) : null}
                 {selectedLabel ? (
                   <div className="selection-chip">
                     <span>{selection?.origin === "pdf" ? "PDF → LaTeX" : "Selected source"}</span>
@@ -2481,6 +2382,8 @@ export function PaperWorkspace() {
                 ) : null}
                 <div className="composer">
                   <textarea
+                    ref={composerRef}
+                    aria-label="Message to agent"
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
                     onKeyDown={(event) => {
@@ -2489,15 +2392,18 @@ export function PaperWorkspace() {
                         sendToAgent();
                       }
                     }}
-                    placeholder={project ? `Ask ${agentName} to revise, check, or explain…` : "Open a paper to begin…"}
+                    placeholder={!project ? "Open a paper to begin…" : skillOptions.id
+                      ? "Optional instructions for this skill…" : `Ask ${agentName} to revise, check, or explain…`}
                     disabled={!project || agentBusy}
                     rows={3}
                   />
                   <button
                     className="send-button"
                     onClick={() => sendToAgent()}
-                    disabled={!prompt.trim() || !project || agentBusy}
-                    aria-label={`Send to ${agentName}`}
+                    disabled={(!prompt.trim() && !skillOptions.id) || !project || !mainFile || agentBusy || compiling
+                      || Boolean(skillOptions.id && skillOptions.scope === "selection" && !selection?.text.trim())}
+                    aria-label={skillOptions.id
+                      ? `Run ${WORKBENCH_SKILLS.find((entry) => entry.id === skillOptions.id)?.label}` : `Send to ${agentName}`}
                   >
                     {agentBusy ? <LoaderCircle className="spin" size={16} /> : <ArrowUp size={16} />}
                   </button>
@@ -2510,13 +2416,45 @@ export function PaperWorkspace() {
               </div>
             </>
           )}
-        </aside>
+        </section>
+
       </div>
+
+      <WorkbenchDialog open={explorerOpen} title="Paper files" description="Files in your paper folder. The agent can also read the surrounding research context."
+        className="paper-files-dialog" onClose={() => setExplorerOpen(false)}>
+        <div id="paper-files-pane" className="paper-files-browser">
+          {project ? (
+            <button className="paper-root-card" onClick={choosePaperFolder} disabled={agentBusy || Boolean(pendingApproval)}>
+              <span className="paper-root-icon"><FileCode2 size={15} /></span>
+              <span>
+                <small>Paper folder · local destination</small>
+                <strong title={project.paperRoot}>{project.paperRoot}</strong>
+              </span>
+              <RefreshCw size={12} />
+            </button>
+          ) : null}
+          <FileTree
+            nodes={project?.tree ?? []}
+            activePath={activePath}
+            paperRoot={project ? relativeTo(project.researchRoot, project.paperRoot) : null}
+            onOpen={(path) => {
+              if ((approvalApplying || applyConfirmationDelayed) && pendingApproval) {
+                const reviewFile = pendingApproval.files?.find((file) => file.path === path);
+                if (reviewFile) { showReviewFile(reviewFile); revealWorkingTab("source"); setExplorerOpen(false); }
+                return;
+              }
+              void openFileAfterSave(path).then((opened) => {
+                if (opened !== null) { revealWorkingTab("source"); setExplorerOpen(false); }
+              }).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not open file"));
+            }}
+          />
+
+        </div>
+      </WorkbenchDialog>
 
       {!project ? (
         <div className="onboarding-overlay">
           <section className="onboarding-card">
-            <span className="onboarding-kicker">Local-first scientific writing</span>
             <h1>Your paper, its source, and your chosen agent—in one view.</h1>
             <p>Choose the research folder that holds your code and data, then the paper folder inside it. The workbench keeps both in context while edits remain yours to approve.</p>
             <button className="button primary onboarding-button" onClick={chooseWorkspace}>
@@ -2532,5 +2470,6 @@ export function PaperWorkspace() {
         </div>
       ) : null}
     </main>
+    </BaseStyles></ThemeProvider>
   );
 }

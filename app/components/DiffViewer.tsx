@@ -2,6 +2,7 @@
 
 import { Check, ChevronRight, FileCode2, RefreshCw, RotateCcw, ShieldCheck, X } from "lucide-react";
 import { parsePatch } from "diff";
+import { Button } from "@primer/react";
 import type { SourceReviewPreview } from "./SourceReview";
 
 export type ApprovalReviewFile = SourceReviewPreview & {
@@ -145,7 +146,6 @@ export function DiffViewer({
         <header className="diff-heading">
           <div className="diff-icon"><ShieldCheck size={17} /></div>
           <div>
-            <span className="eyebrow">{agentName} is waiting</span>
             <h3>Allow research-support work?</h3>
           </div>
         </header>
@@ -209,12 +209,12 @@ export function DiffViewer({
         <footer className="diff-actions">
           <span className="diff-undo-note">Permission ends with this turn · network remains disabled</span>
           <div className="diff-action-buttons">
-            <button className="button ghost danger" onClick={onReject} disabled={busy}>
+            <Button variant="danger" onClick={onReject} disabled={busy}>
               <X size={15} /> Reject
-            </button>
-            <button className="button primary" onClick={onAccept} disabled={busy}>
+            </Button>
+            <Button variant="primary" onClick={onAccept} disabled={busy}>
               <Check size={15} /> {busy ? "Allowing…" : "Allow for this turn"}
-            </button>
+            </Button>
           </div>
         </footer>
       </div>
@@ -228,7 +228,6 @@ export function DiffViewer({
       <header className="diff-heading">
         <div className="diff-icon"><ShieldCheck size={17} /></div>
         <div>
-          <span className="eyebrow">{agentName} is waiting</span>
           <h3>Review changes</h3>
         </div>
       </header>
@@ -295,21 +294,21 @@ export function DiffViewer({
           <>
             <span className="diff-undo-note">The reviewed source stays read only while you verify the result.</span>
             <div className="diff-action-buttons single">
-              <button className="button primary" onClick={onCheckStatus} disabled={busy || !onCheckStatus}>
+              <Button variant="primary" onClick={onCheckStatus} disabled={busy || !onCheckStatus}>
                 <RefreshCw className={busy ? "spin" : ""} size={15} /> {busy ? "Checking…" : "Check status"}
-              </button>
+              </Button>
             </div>
           </>
         ) : (
           <>
             <span className="diff-undo-note"><RotateCcw size={13} /> You can undo after accepting</span>
             <div className="diff-action-buttons">
-              <button className="button ghost danger" onClick={onReject} disabled={busy}>
+              <Button variant="danger" onClick={onReject} disabled={busy}>
                 <X size={15} /> Reject
-              </button>
-              <button className="button primary" onClick={onAccept} disabled={busy}>
+              </Button>
+              <Button variant="primary" onClick={onAccept} disabled={busy}>
                 <Check size={15} /> {busy ? "Applying…" : "Accept"}
-              </button>
+              </Button>
             </div>
           </>
         )}

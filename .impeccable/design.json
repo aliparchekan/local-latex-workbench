@@ -1,0 +1,259 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-18T20:36:16.579Z",
+  "title": "Design System: Local LaTeX Workbench",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Slate blue action",
+        "tonalRamp": [
+          "#153e7e",
+          "#1c4b95",
+          "#245baf",
+          "#567baa",
+          "#80b4ff",
+          "#90afd9",
+          "#b4d3ff",
+          "#d9e6f8"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Slate blue interaction",
+        "tonalRamp": [
+          "#153e7e",
+          "#1c4b95",
+          "#245baf",
+          "#567baa",
+          "#80b4ff",
+          "#90afd9",
+          "#b4d3ff",
+          "#d9e6f8"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Canvas",
+        "tonalRamp": [
+          "#243247",
+          "#394659",
+          "#526276",
+          "#758599",
+          "#c4ceda",
+          "#dce3eb",
+          "#e8edf2",
+          "#f5f7fa"
+        ]
+      },
+      "canvas-muted": {
+        "role": "neutral",
+        "displayName": "Muted canvas",
+        "tonalRamp": [
+          "#243247",
+          "#394659",
+          "#526276",
+          "#758599",
+          "#c4ceda",
+          "#dce3eb",
+          "#e8edf2",
+          "#f5f7fa"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Primary text",
+        "tonalRamp": [
+          "#243247",
+          "#394659",
+          "#526276",
+          "#758599",
+          "#c4ceda",
+          "#dce3eb",
+          "#e8edf2",
+          "#f5f7fa"
+        ]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "Secondary text",
+        "tonalRamp": [
+          "#243247",
+          "#394659",
+          "#526276",
+          "#758599",
+          "#c4ceda",
+          "#dce3eb",
+          "#e8edf2",
+          "#f5f7fa"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Structural border",
+        "tonalRamp": [
+          "#243247",
+          "#394659",
+          "#526276",
+          "#758599",
+          "#c4ceda",
+          "#dce3eb",
+          "#e8edf2",
+          "#f5f7fa"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Workspace title",
+        "purpose": "Compact app identification; not a display or marketing face."
+      },
+      "body": {
+        "displayName": "UI body",
+        "purpose": "Native Primer system stack; conversation leading expands to 1.65."
+      },
+      "code": {
+        "displayName": "Source editor",
+        "purpose": "Monospaced LaTeX; manuscript PDF typography is independent."
+      },
+      "control": {
+        "displayName": "Native control",
+        "purpose": "Primer medium-button type; compact custom metadata is not the body standard."
+      }
+    },
+    "shadows": [
+      {
+        "name": "paper",
+        "value": "0 1px 6px #00000018",
+        "purpose": "Separates the fixed white PDF sheet from its inset well."
+      },
+      {
+        "name": "dialog",
+        "value": "var(--shadow-floating-small, 0 0 0 1px #d1d9e080, 0 6px 12px -3px #25292e0a, 0 6px 18px 0 #25292e1f)",
+        "purpose": "Native Primer dialog depth; inherits the active theme."
+      }
+    ],
+    "motion": [
+      {
+        "name": "pane-columns",
+        "value": "grid-template-columns 200ms ease",
+        "purpose": "Existing pane collapse/expand transition; disabled during dragging and with reduced motion."
+      },
+      {
+        "name": "button-state",
+        "value": "80ms cubic-bezier(.65,0,.35,1)",
+        "purpose": "Native Primer state transition; no custom entrance choreography."
+      },
+      {
+        "name": "native-dialog",
+        "value": "200ms cubic-bezier(.33,1,.68,1)",
+        "purpose": "Imported Primer opening motion, not a custom design motif; disabled with reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "full-width-task-views-max",
+        "value": "760px"
+      },
+      {
+        "name": "condensed-desktop-max",
+        "value": "1250px"
+      },
+      {
+        "name": "short-viewport-max-height",
+        "value": "740px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Native primary treatment used by Compile, Save settings, and real Accept; this documentation specimen performs no action.",
+      "html": "<button class=\"ds-primary\" type=\"button\">Accept</button>",
+      "css": ".ds-primary{font:500 14px/1.5 var(--fontStack-system,system-ui,sans-serif);height:32px;padding:0 12px;border:1px solid var(--button-primary-borderColor-rest,#24324726);border-radius:6px;background:var(--button-primary-bgColor-rest,#245baf);color:var(--button-primary-fgColor-rest,#fff);cursor:pointer;transition:background 80ms cubic-bezier(.65,0,.35,1)}.ds-primary:hover{background:var(--button-primary-bgColor-hover,#1c4b95)}.ds-primary:active{background:var(--button-primary-bgColor-active,#153e7e);transition:none}.ds-primary:focus-visible{outline:2px solid var(--focus-outlineColor,#245baf);outline-offset:2px}.ds-primary:disabled{background:var(--button-primary-bgColor-disabled,#d4deec);color:var(--button-primary-fgColor-disabled,#526276);cursor:not-allowed}@media(prefers-reduced-motion:reduce){.ds-primary{transition:none}}"
+    },
+    {
+      "name": "Default button",
+      "kind": "button",
+      "refersTo": "button-default",
+      "description": "Neutral secondary action, used for Files and Cancel; real Reject uses Primer danger.",
+      "html": "<button class=\"ds-default\" type=\"button\">Files</button>",
+      "css": ".ds-default{font:500 14px/1.5 var(--fontStack-system,system-ui,sans-serif);height:32px;padding:0 12px;border:1px solid var(--button-default-borderColor-rest,#c4ceda);border-radius:6px;background:var(--button-default-bgColor-rest,#e8edf2);color:var(--button-default-fgColor-rest,#243247);box-shadow:var(--button-default-shadow-resting,0 1px 0 0 #2432470a);cursor:pointer;transition:background 80ms cubic-bezier(.65,0,.35,1)}.ds-default:hover{background:var(--button-default-bgColor-hover,#dce3eb)}.ds-default:active{background:var(--button-default-bgColor-active,#dce3eb);transition:none}.ds-default:focus-visible{outline:2px solid var(--focus-outlineColor,#245baf);outline-offset:-2px}.ds-default:disabled{background:var(--button-default-bgColor-disabled,#dce3eb);color:var(--control-fgColor-disabled,#758599);cursor:not-allowed}@media(prefers-reduced-motion:reduce){.ds-default{transition:none}}"
+    },
+    {
+      "name": "Invisible button",
+      "kind": "button",
+      "refersTo": "button-invisible",
+      "description": "Low-emphasis toolbar and utility actions; icon versions retain accessible names.",
+      "html": "<button class=\"ds-invisible\" type=\"button\">Reset</button>",
+      "css": ".ds-invisible{font:500 14px/1.5 var(--fontStack-system,system-ui,sans-serif);height:32px;padding:0 12px;border:1px solid transparent;border-radius:6px;background:var(--button-invisible-bgColor-rest,transparent);color:var(--button-invisible-fgColor-rest,#243247);cursor:pointer;transition:background 80ms cubic-bezier(.65,0,.35,1)}.ds-invisible:hover{background:var(--button-invisible-bgColor-hover,#7585991a)}.ds-invisible:active{background:var(--button-invisible-bgColor-active,#75859926);transition:none}.ds-invisible:focus-visible{outline:2px solid var(--focus-outlineColor,#245baf);outline-offset:-2px}.ds-invisible:disabled{color:var(--control-fgColor-disabled,#758599);cursor:not-allowed}@media(prefers-reduced-motion:reduce){.ds-invisible{transition:none}}"
+    },
+    {
+      "name": "Composer field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Composer field treatment; this documentation specimen never sends data.",
+      "html": "<textarea class=\"ds-composer\" aria-label=\"Message to agent\" rows=\"3\" placeholder=\"Ask about the selected passage…\"></textarea>",
+      "css": ".ds-composer{font:400 14px/1.5 var(--fontStack-system,system-ui,sans-serif);width:calc(100% - 26px);min-height:90px;resize:none;padding:12px;border:1px solid var(--control-borderColor-rest,#758599);border-radius:6px;background:var(--bgColor-default,#f5f7fa);color:var(--fgColor-default,#243247);caret-color:var(--fgColor-accent,#245baf)}.ds-composer::placeholder{color:var(--fgColor-muted,#526276)}.ds-composer:hover{border-color:var(--control-borderColor-rest,#758599)}.ds-composer:focus-visible{border-color:var(--focus-outlineColor,#245baf);outline:1px solid var(--focus-outlineColor,#245baf);outline-offset:0}.ds-composer:disabled{background:var(--control-bgColor-disabled,#dce3eb);color:var(--control-fgColor-disabled,#758599)}@media(max-width:760px){.ds-composer{font-size:16px}}"
+    },
+    {
+      "name": "Mobile task navigation",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Static Primer segmented-control specimen; actual app selection switches full-width task views only on phones.",
+      "html": "<div class=\"ds-nav\" role=\"group\" aria-label=\"Workspace view\"><button type=\"button\" aria-pressed=\"false\">Source</button><button type=\"button\" aria-pressed=\"true\">Paper</button><button type=\"button\" aria-pressed=\"false\">Agent</button></div>",
+      "css": ".ds-nav{display:flex;height:32px;border:1px solid var(--controlTrack-borderColor-rest,#c4ceda);border-radius:6px;background:var(--controlTrack-bgColor-rest,#dce3eb);color:var(--fgColor-default,#243247)}.ds-nav button{flex:1;font:400 14px/1.5 var(--fontStack-system,system-ui,sans-serif);padding:0 12px;border:1px solid transparent;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.ds-nav button[aria-pressed=true]{font-weight:600;background:var(--controlKnob-bgColor-rest,#fff);border-color:var(--controlKnob-borderColor-rest,#c4ceda)}.ds-nav button:not([aria-pressed=true]):hover{background:var(--controlTrack-bgColor-hover,#e0e6eb)}.ds-nav button:not([aria-pressed=true]):active{background:var(--controlTrack-bgColor-active,#dae0e7)}.ds-nav button:focus-visible{outline:2px solid var(--focus-outlineColor,#245baf);outline-offset:-1px}"
+    },
+    {
+      "name": "Review file row and document label",
+      "kind": "card",
+      "refersTo": "review-row",
+      "description": "Two production patterns: a native LaTeX metadata label and the affected-file button that opens source review. This specimen does not open files.",
+      "html": "<span class=\"ds-label\">LaTeX</span><button class=\"ds-review-row\" type=\"button\" aria-label=\"Review main.tex in source\"><span class=\"ds-review-copy\"><strong>main.tex</strong><small>Update · 1 change</small></span><span class=\"ds-review-counts\" aria-label=\"1 line added and 1 line removed\"><span class=\"ds-added\">+1</span><span class=\"ds-removed\">−1</span></span></button>",
+      "css": ".ds-label{display:inline-flex;align-items:center;height:20px;margin-bottom:8px;padding:0 6px;border:1px solid var(--borderColor-muted,#c4cedab3);border-radius:9999px;font:500 12px/1 var(--fontStack-system,system-ui,sans-serif);color:var(--fgColor-muted,#526276)}.ds-review-row{display:flex;width:100%;align-items:center;gap:8px;padding:8px;border:1px solid var(--borderColor-default,#c4ceda);border-radius:8px;background:var(--bgColor-default,#f5f7fa);color:var(--fgColor-default,#243247);text-align:left;cursor:pointer;transition:border-color 150ms ease,background 150ms ease}.ds-review-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}.ds-review-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:650 12px/1.5 var(--fontStack-monospace,ui-monospace,monospace)}.ds-review-copy small{font:400 11px/1.5 var(--fontStack-system,system-ui,sans-serif);color:var(--fgColor-muted,#526276)}.ds-review-counts{display:flex;gap:4px;font:750 11px/1.5 var(--fontStack-monospace,ui-monospace,monospace)}.ds-added{color:var(--fgColor-success,#1a7f37)}.ds-removed{color:var(--fgColor-danger,#d1242f)}.ds-review-row:hover:not(:disabled){background:var(--bgColor-default,#f5f7fa);border-color:var(--borderColor-default,#c4ceda)}.ds-review-row[aria-current=true]{background:var(--bgColor-accent-muted,#d9e6f8)}.ds-review-row:focus-visible{outline:2px solid var(--focus-outlineColor,#245baf);outline-offset:1px}.ds-review-row:disabled{cursor:default}@media(prefers-reduced-motion:reduce){.ds-review-row{transition:none}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Primer Product UI",
+    "overview": "A manuscript workspace expressed in Primer's familiar product language. Neutral surfaces, native UI sans, compact controls, and explicit states keep the manuscript and the next action legible together. This is the user's approved replacement for the warm cream, forest-green, serif interface; no additional decorative identity is introduced.\n\nThis record describes the integrated workbench, not the isolated preview. Native Primer controls frame the existing local subscription, compilation, selection, and review workflows. Visual consistency must not blur the difference between a proposal, an unconfirmed write, a saved file, and a rendered PDF.\n\nThe approved palette pair is Slate blue light and Graphite dark, applied through Primer semantic roles. Primary actions use blue; review success, warning and danger colors remain independent. The manuscript stays white.",
+    "keyCharacteristics": [
+      "Primer components and semantic theme tokens are authoritative.",
+      "Flat workspace surfaces; restrained depth for paper and dialogs.",
+      "Concurrent desktop working context with explicit selection, review, and save states."
+    ],
+    "rules": [
+      {
+        "name": "The Semantic Color Rule",
+        "body": "Use Primer role tokens for interface color; reserve fixed white paper and manuscript ink for the PDF artifact.",
+        "section": "colors"
+      },
+      {
+        "name": "The Source Alignment Rule",
+        "body": "Keep source, gutter, and review text on the same 22px line grid; verify source-location behavior when changing it.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Workspace Rule",
+        "body": "Keep working panes flat; use elevation to distinguish paper and modal overlays.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Truthful State Rule",
+        "body": "A proposal is not a saved file, and a saved source file is not proof of a rebuilt PDF or a completed agent run.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do use installed Primer components and semantic tokens as the source of truth in both themes.",
+      "Do preserve desktop pane concurrency, selection context, keyboard focus, and separate gear/info dialogs.",
+      "Do preserve live subscription catalogs, local save status, approval boundaries, and the stated limits of Undo."
+    ],
+    "donts": [
+      "Don't reintroduce cream/forest/serif chrome or invent a decorative brand identity.",
+      "Don't replace real model catalogs with fixture options or present test activity as a live agent run.",
+      "Don't imply pane drag-reordering, automatic PDF recompilation, or reversibility that the workflow does not provide."
+    ]
+  }
+}

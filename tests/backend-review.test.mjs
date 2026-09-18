@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createTwoFilesPatch } from "diff";
+import { claimAutoApproval } from "../app/lib/auto-approval.mjs";
 
 import {
   activeTurns,
@@ -376,13 +377,14 @@ test("reviews, finalizes, and undoes updates and additions outside paperRoot but
   await assert.rejects(readFile(metadataPath), (error) => error.code === "ENOENT");
 });
 
-test("applies alternate-provider proposals only after approval and preserves Undo", async (t) => {
+for (const provider of ["claude", "cursor"]) for (const automatic of [false, true]) {
+test(`applies ${provider} proposals with ${automatic ? "automatic" : "manual"} approval and preserves Undo`, async (t) => {
   const { researchRoot, paperRoot } = await fixture(t);
   const session = {
     researchRoot,
     paperRoot,
-    provider: "claude",
-    threadId: "claude:test-thread",
+    provider,
+    threadId: `${provider}:test-thread-${automatic}`,
   };
   const sourcePath = path.join(paperRoot, "main.tex");
   const addedPath = path.join(researchRoot, "analysis.md");
@@ -419,6 +421,13 @@ test("applies alternate-provider proposals only after approval and preserves Und
   assert.equal(await readFile(sourcePath, "utf8"), "before\n");
   await assert.rejects(readFile(addedPath), (error) => error.code === "ENOENT");
 
+  if (automatic) {
+    const proposal = { id: requestId, approvalType: "file", files: materialized.files };
+    const attempted = new Set();
+    assert.equal(claimAutoApproval(proposal, false, false, attempted), false);
+    assert.equal(claimAutoApproval(proposal, true, false, attempted), true);
+    assert.equal(claimAutoApproval(proposal, true, false, attempted), false);
+  }
   const accepted = await decideApproval({
     researchRoot,
     paperRoot,
@@ -434,6 +443,7 @@ test("applies alternate-provider proposals only after approval and preserves Und
   assert.equal(await readFile(sourcePath, "utf8"), "before\n");
   await assert.rejects(readFile(addedPath), (error) => error.code === "ENOENT");
 });
+}
 
 test("rejects alternate-provider paths outside the research root", async (t) => {
   const { researchRoot, paperRoot } = await fixture(t);

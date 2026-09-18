@@ -24,7 +24,7 @@ test("server-renders the Local LaTeX Workbench application shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>Local LaTeX Workbench[^<]*AI paper workspace<\/title>/i);
   assert.match(html, /Local LaTeX Workbench/);
-  assert.match(html, /local paper studio/i);
+  assert.match(html, /Workspace views/);
   assert.match(html, /Choose research workspace/i);
   assert.doesNotMatch(html, /Your site is taking shape|codex-preview|react-loading-skeleton/i);
 });
@@ -46,6 +46,27 @@ test("keeps the product local and subscription-backed", async () => {
   assert.doesNotMatch(packageJson, /vinext (?:dev|start) -p 3000/);
   assert.doesNotMatch(packageJson, /"openai"\s*:/);
   assert.doesNotMatch(layout, /codex-preview|Starter Project/);
+});
+
+test("keeps skill settings and information in independent accessible dialogs", async () => {
+  const [skills, dialog, styles] = await Promise.all([
+    readFile(new URL("../app/components/SkillControls.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/WorkbenchDialog.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(skills, /icon=\{GearIcon\}/);
+  assert.match(skills, /aria-label="Skill settings"/);
+  assert.equal((skills.match(/<WorkbenchDialog /g) ?? []).length, 2);
+  assert.match(skills, /aria-haspopup="dialog"/);
+  assert.match(skills, /lattice:skill-defaults:v2:/);
+  assert.match(skills, /localStorage\.setItem\(storageKey, JSON\.stringify\(normalized\)\)/);
+  assert.match(skills, /const close = \(\) => setDraft\(null\)/);
+  assert.match(dialog, /import \{ Dialog \} from "@primer\/react"/);
+  assert.match(dialog, /if \(!open\) return null/);
+  assert.match(dialog, /onClose=\{onClose\}/);
+  assert.match(dialog, /title=\{title\}/);
+  assert.match(styles, /\.workbench-dialog-body \{[^}]*min-height: 0;[^}]*overflow-y: auto/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
 test("offers isolated Codex, Claude Code, and Cursor subscription adapters", async () => {
@@ -143,13 +164,13 @@ test("makes local save destinations and persistence state explicit", async () =>
     ["const choosePaperFolder", "const copyLocalPath"],
     ["const locateSourceInPdf", "const handlePdfSelection"],
     ["const sendToAgent", "const decideApproval"],
-    ["const undoLastChange", "const explorerMaximum"],
+    ["const undoLastChange", "const resizePane"],
   ];
   for (const [startMarker, endMarker] of guardedSections) {
     const start = workspace.indexOf(startMarker);
     const end = workspace.indexOf(endMarker, start);
     assert.ok(start >= 0 && end > start, `missing ${startMarker} persistence boundary`);
-    assert.match(workspace.slice(start, end), /if \(!\(await saveNow\(\)\)\) return(?: (?:false|null))?;/);
+    assert.match(workspace.slice(start, end), /if \(!\(await saveNow\(\)\)\) (?:return(?: (?:false|null))?;|\{ sendingRef\.current = false; return; \})/);
   }
   assert.match(workspace, /void openFileAfterSave\(path\)/);
   assert.match(workspace, /const nextContent = await openFileAfterSave\(primaryPath, project\)/);
@@ -167,7 +188,8 @@ test("preserves the PDF reading position across recompiles of the same paper", a
   assert.match(pdfViewer, /horizontalRatio: number/);
   assert.match(pdfViewer, /captureReadingPosition\(container/);
   assert.match(pdfViewer, /restoreReadingPosition\(container, position\)/);
-  assert.match(pdfViewer, /data-pdf-page-number=\{pageNumber\}/);
+  // Removed-page previews must not participate in the current PDF's scroll anchors.
+  assert.match(pdfViewer, /data-pdf-page-number=\{removed \? undefined : pageNumber\}/);
   assert.match(pdfViewer, /ref=\{pagesRef\} className="pdf-pages" onScroll=\{rememberReadingPosition\}/);
   assert.match(pdfViewer, /useLayoutEffect\(\(\) => \{[\s\S]*?window\.requestAnimationFrame/);
   assert.match(pdfViewer, /revealedFocusRef\.current === focus/);
@@ -198,6 +220,40 @@ test("keeps the agent conversation pinned to its newest message", async () => {
   assert.match(workspace, /<div ref=\{chatScrollRef\} className="chat-scroll">/);
 });
 
+test("defaults PDF highlights to content matching and applies PDF.js text geometry", async () => {
+  const [viewer, styles, comparison] = await Promise.all([
+    readFile(new URL("../app/components/PdfViewer.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/lib/pdf-comparison.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(viewer, /useState<PdfComparisonMode>\("text"\)/);
+  assert.match(viewer, /aria-label="PDF comparison mode"/);
+  assert.match(viewer, /<option value="visual">Visual \/ figures \(includes layout shifts\)<\/option>/);
+  assert.match(viewer, /Partial text comparison/);
+  assert.match(viewer, /Those passages are left unhighlighted, not marked as unchanged/);
+  assert.match(comparison, /unresolved: diff\.unresolved \?\? \[\]/);
+  assert.match(comparison, /if \(mode === "text"\) return comparePdfText/);
+  assert.match(comparison, /range\.setStart\(node, span\.start\)/);
+  assert.match(styles, /font-size: calc\(var\(--text-scale-factor\) \* var\(--font-height, 0px\)\)/);
+  assert.match(styles, /scaleX\(var\(--scale-x, 1\)\)/);
+});
+
+test("auto-approval is an explicit per-paper opt-in using the existing apply recovery", async () => {
+  const [workspace, control] = await Promise.all([
+    readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/AutoApproval.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(control, /useState\(false\)/);
+  assert.match(control, /role="switch"/);
+  assert.match(control, /aria-label="Auto-approve edits"/);
+  assert.doesNotMatch(control, /localStorage|sessionStorage/);
+  assert.match(workspace, /key=\{JSON.stringify\(\[project\?\.researchRoot, project\?\.paperRoot, mainFile, agentProvider\]\)\}/);
+  assert.match(workspace, /onApprove=\{\(\) => decideApproval\("accept", true\)\}/);
+  assert.match(workspace, /pendingApproval.approvalType !== "file"/);
+  assert.match(workspace, /approvalDecisionInFlightRef.current = true/);
+  assert.match(workspace, /approvalApplying \|\| applyConfirmationDelayed \|\| refreshingAfterApply/);
+});
+
 test("supports resizable panes and full-source approval review", async () => {
   const [workspace, resizeHandle, sourceReview, diffViewer, companion, styles] = await Promise.all([
     readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
@@ -208,8 +264,9 @@ test("supports resizable panes and full-source approval review", async () => {
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
-  assert.equal([...workspace.matchAll(/<ResizeHandle\b/g)].length, 3);
-  assert.match(workspace, /lattice:pane-layout:v1/);
+  assert.equal([...workspace.matchAll(/<ResizeHandle\b/g)].length, 1);
+  assert.match(workspace, /lattice:primer-pane-layout:v1/);
+  assert.match(workspace, /label=\{`Resize \$\{pane\} pane`\}/);
   assert.match(workspace, /review=\{activeReviewFile\}/);
   assert.match(workspace, /const files = event\.files \?\? \[\]/);
   assert.match(resizeHandle, /role="separator"/);
@@ -229,6 +286,24 @@ test("supports resizable panes and full-source approval review", async () => {
   assert.match(companion, /expectedAfter/);
   assert.match(styles, /grid-template-columns: var\(--explorer-width/);
   assert.match(styles, /\.source-review-line-added/);
+});
+
+test("keeps source and agent in independent mounted Primer panes", async () => {
+  const [workspace, styles] = await Promise.all([
+    readFile(new URL("../app/components/PaperWorkspace.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/primer-workbench.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(workspace, /id="source-tool-panel"/);
+  assert.match(workspace, /id="codex-pane"/);
+  assert.doesNotMatch(workspace, /drawerTab|Working drawer tools/);
+  assert.match(workspace, /paneHandle\("source"\)/);
+  assert.match(workspace, /paneHandle\("agent"\)/);
+  assert.match(workspace, /setSourceVisible\(true\)/);
+  assert.match(workspace, /setAgentVisible\(true\)/);
+  assert.match(workspace, /<WorkbenchDialog open=\{explorerOpen\} title="Paper files"/);
+  assert.match(workspace, /aria-label="Workspace views"/);
+  assert.match(styles, /grid-template-columns: var\(--source-width\) 5px minmax\(0,1fr\) 5px var\(--agent-width\)/);
+  assert.match(styles, /@media \(max-width: 760px\)/);
 });
 
 test("settles approved changes from backend receipts and offers delayed-status recovery", async () => {

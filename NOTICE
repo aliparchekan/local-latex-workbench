@@ -1,6 +1,12 @@
 Local LaTeX Workbench
 Copyright 2026 Ali Parchekani
 
+Bundled writing, review, data-inspection, and report skills adapt ExplorerFreda/fskills at commit
+824f95cb33fe6756a46f5a47e2dba5293c59dc63 (Apache-2.0). Writing guidance also
+credits The Elements of Agent Style, copyright Yue Zhao and contributors,
+CC BY 4.0. See skills/ATTRIBUTION.md for source links, modifications, and
+the CC BY 4.0 license applying to skills/workbench-polish/SKILL.md.
+
 This product is licensed under the Apache License, Version 2.0.
 
 Local LaTeX Workbench is an independent, unofficial project. It is not

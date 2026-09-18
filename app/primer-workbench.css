@@ -1,0 +1,247 @@
+/* Approved Primer layout 1: source, paper, and agent are independent panes. */
+:root, [data-color-mode] {
+  --paper: var(--bgColor-default, #fff);
+  --paper-bright: var(--bgColor-default, #fff);
+  --panel: var(--bgColor-muted, #f6f8fa);
+  --ink: var(--fgColor-default, #1f2328);
+  --code: var(--fgColor-default, #1f2328);
+  --muted: var(--fgColor-muted, #59636e);
+  --line: var(--borderColor-default, #d1d9e0);
+  --line-soft: var(--borderColor-muted, #d1d9e0b3);
+  --green: var(--fgColor-accent, #0969da);
+  --green-dark: var(--fgColor-accent, #0969da);
+  --green-soft: var(--bgColor-accent-muted, #ddf4ff);
+  --red: var(--fgColor-danger, #d1242f);
+  --red-soft: var(--bgColor-danger-muted, #ffebe9);
+  --coral: var(--fgColor-attention, #9a6700);
+  --coral-soft: var(--bgColor-attention-muted, #fff8c5);
+  --font-ui: var(--fontStack-system);
+  --font-serif: var(--fontStack-system);
+  --font-mono: var(--fontStack-monospace);
+}
+html, body { background: var(--paper); color: var(--ink); font-family: var(--font-ui); }
+.primer-workbench { height: 100dvh; min-width: 0; font-size: 14px; isolation: isolate; }
+::selection { background: var(--bgColor-accent-muted); color: var(--fgColor-default); }
+input, textarea { caret-color: var(--fgColor-accent); }
+:is(button,input,select,textarea,[tabindex]):focus-visible { outline: 2px solid var(--focus-outlineColor); outline-offset: 2px; }
+:is(input,textarea)::placeholder { color: var(--fgColor-muted); opacity: 1; }
+button { touch-action: manipulation; }
+.primer-workbench .topbar { height: 60px; flex-basis: 60px; padding: 0 20px; gap: 12px; background: var(--bgColor-default); border-color: var(--line); }
+.primer-workbench .brand { width: auto; flex: 0 0 auto; gap: 10px; }
+.primer-workbench .brand strong { font-size: 15px; font-weight: 600; white-space: nowrap; letter-spacing: normal; }
+.primer-workbench .brand svg { color: var(--fgColor-default); }
+.primer-workbench .workspace-picker { width: auto; min-width: 0; max-width: 220px; height: 32px; font-size: 14px; }
+.primer-workbench .workspace-picker [data-component=buttonContent] { min-width: 0; width: 100%; }
+.primer-workbench .workspace-picker [data-component=text] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-pane-toggles { display: flex; gap: 2px; }
+.desktop-pane-toggles button[aria-pressed=true] { background: var(--bgColor-muted); }
+.primer-workbench .connection-pill { max-width: 145px; padding: 0; border: 0; background: transparent; font-size: 11px; color: var(--muted); }
+.primer-workbench .connection-pill > span { box-shadow: none; background: var(--fgColor-muted); }
+.primer-workbench .connection-pill.connected > span { background: var(--fgColor-success); }
+.primer-workbench .compile-button { min-width: 94px; }
+.compile-button [data-component=text] { display: flex; align-items: center; gap: 6px; }
+.primer-workbench .workspace-grid { grid-template-columns: var(--source-width) 5px minmax(0,1fr) 5px var(--agent-width); grid-template-rows: minmax(0,1fr); overflow: hidden; }
+.primer-workbench.source-collapsed .workspace-grid { grid-template-columns: 0 0 minmax(0,1fr) 5px var(--agent-width); }
+.primer-workbench.agent-collapsed .workspace-grid { grid-template-columns: var(--source-width) 5px minmax(0,1fr) 0 0; }
+.primer-workbench.source-collapsed.agent-collapsed .workspace-grid { grid-template-columns: 0 0 minmax(0,1fr) 0 0; }
+.source-tool-panel, .document-workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bgColor-default); }
+.source-tool-panel { grid-column: 1; grid-row: 1; }
+.primer-workbench .document-workspace { grid-column: 3; grid-row: 1; }
+.primer-workbench .agent-panel { grid-column: 5; grid-row: 1; background: var(--bgColor-default); border: 0; }
+.primer-workbench .source-resizer { grid-column: 2; grid-row: 1; }
+.primer-workbench .agent-resizer { grid-column: 4; grid-row: 1; }
+.primer-workbench.source-collapsed :is(.source-tool-panel,.source-resizer),
+.primer-workbench.agent-collapsed :is(.agent-panel,.agent-resizer) { visibility: hidden; }
+.primer-workbench .resize-handle { background: var(--borderColor-muted); }
+.primer-workbench .resize-handle::after { background: transparent; }
+.primer-workbench .resize-handle:is(:hover,:focus-visible,.is-dragging) { background: var(--bgColor-accent-emphasis); }
+.workspace-pane-heading, .paper-toolbar { min-height: 48px; height: 48px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 0 16px; background: var(--bgColor-muted); border-bottom: 1px solid var(--borderColor-muted); font-size: 13px; }
+.workspace-pane-heading > strong { font-weight: 600; }
+.workspace-pane-heading > svg, .paper-heading > svg { color: var(--muted); flex: none; }
+.pane-close { margin-left: auto; }
+.paper-heading { min-width: 0; display: flex; align-items: center; gap: 8px; flex: 1; }
+.paper-heading strong { font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.primer-workbench .main-file-picker { padding: 0; border: 0; height: auto; min-width: 0; gap: 6px; text-transform: none; font-size: 11px; letter-spacing: normal; }
+.main-file-picker > span:last-child { min-width: 0; max-width: 160px; }
+.primer-workbench .main-file-picker select { width: 100%; min-width: 0; font-size: 12px; }
+.paper-format { flex: none; }
+.primer-workbench :is(.preview-pane,.source-pane) { flex: 1; min-height: 0; overflow: hidden; }
+.primer-workbench .preview-pane > .pane-label { display: none; }
+.primer-workbench .document-toolbar { min-height: 78px; height: auto; flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; background: var(--bgColor-default); border-color: var(--borderColor-muted); }
+.primer-workbench .document-tab { flex: 1; min-width: 0; max-width: none; height: 26px; padding: 0; background: transparent; border: 0; border-radius: 0; font-size: 12px; }
+.primer-workbench .document-tab > span { overflow: hidden; text-overflow: ellipsis; }
+.primer-workbench .active-disk-path { order: 3; flex: 1 0 100%; min-width: 0; height: 28px; padding: 0; border: 0; background: transparent; }
+.primer-workbench .active-disk-path code { font-size: 11px; color: var(--muted); }
+.primer-workbench .path-prefix { display: none; }
+.primer-workbench .path-action { width: 28px; height: 28px; padding: 0; flex: none; color: var(--muted); }
+.primer-workbench .path-action svg { width: 14px; height: 14px; }
+.primer-workbench .path-action span { display: none; }
+.primer-workbench .save-state { max-width: 190px; height: 26px; padding: 0 4px; font-size: 11px; color: var(--muted); }
+.primer-workbench .save-state small { display: none; }
+.primer-workbench .save-state-unsaved { color: var(--fgColor-attention); }
+.primer-workbench .pane-label { height: 30px; flex-basis: 30px; padding-inline: 12px; font-size: 11px; letter-spacing: normal; text-transform: none; background: var(--bgColor-muted); }
+.primer-workbench .pane-label small { color: var(--muted); font-size: 10px; letter-spacing: normal; }
+.primer-workbench :is(.source-gutter,.source-editor textarea) { font-size: 12px; line-height: 22px; background: var(--bgColor-default); }
+.primer-workbench .source-gutter { color: var(--muted); }
+.primer-workbench .source-editor textarea { padding-inline: 8px 16px; color: var(--ink); }
+.primer-workbench .source-editor textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-outlineColor); }
+.primer-workbench :is(.locate-button,.readonly-pill) { min-height: 30px; font-size: 11px; }
+.source-context-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 8px 12px; border-top: 1px solid var(--line-soft); background: var(--bgColor-default); }
+.source-context-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
+.source-context-actions > button { flex: none; }
+.primer-workbench .source-review-tabs { min-height: 36px; }
+.primer-workbench .source-review-tabs button { font-size: 12px; }
+.primer-workbench .source-review-code { font-size: 12px; line-height: 22px; }
+.primer-workbench .source-review-file strong { font-size: 12px; }
+.primer-workbench .source-review-kind { font-size: 10px; letter-spacing: normal; text-transform: none; }
+.primer-workbench .source-review-toggle button { height: 30px; font-size: 12px; }
+.primer-workbench .source-review-meta { min-height: 30px; font-size: 11px; letter-spacing: normal; }
+.primer-workbench .source-review-line-number { color: var(--muted); }
+.primer-workbench :is(.source-review-warning,.source-review-move) { font-size: 12px; line-height: 1.6; }
+.primer-workbench .pdf-viewer { background: var(--bgColor-inset); }
+.primer-workbench .pdf-pages { padding: 20px 20px 48px; scrollbar-gutter: stable; }
+.primer-workbench .pdf-page { background: white; color: black; box-shadow: 0 1px 6px #00000018; }
+.primer-workbench .pdf-tools { min-height: 40px; padding: 6px 12px; font-size: 12px; background: var(--bgColor-default); border-color: var(--line-soft); }
+.primer-workbench .zoom-control { height: 28px; font-variant-numeric: tabular-nums; }
+.primer-workbench .zoom-control button { height: 28px; width: 28px; }
+.primer-workbench .zoom-control .fit-width-button { width: auto; padding-inline: 8px; font-size: 12px; border-radius: 6px; }
+.primer-workbench .page-number { color: var(--muted); font-size: 11px; right: 2px; bottom: -20px; }
+.primer-workbench .build-status { min-height: 30px; height: auto; flex: none; padding: 6px 12px; gap: 8px; background: var(--bgColor-muted); font-size: 11px; }
+.primer-workbench .build-status button { min-width: 0; text-align: left; font-size: 11px; }
+.primer-workbench .build-status > span { display: none; }
+.primer-workbench .compile-log { max-height: 180px; font-size: 12px; line-height: 1.6; background: var(--bgColor-muted); color: var(--ink); }
+.primer-workbench .agent-header { height: auto; min-height: 34px; flex: none; padding: 8px 16px; gap: 8px; border: 0; }
+.primer-workbench .agent-avatar { display: none; }
+.primer-workbench .agent-header strong { font-size: 12px; font-weight: 600; }
+.primer-workbench .agent-runtime { font-size: 10px; max-width: 240px; line-height: 1.5; color: var(--muted); }
+.primer-workbench .agent-status { margin-left: auto; max-width: 50%; font-size: 11px; text-align: right; white-space: normal; }
+.agent-controls { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; padding: 4px 16px 12px; border-bottom: 1px solid var(--line-soft); flex: none; }
+.primer-workbench .reasoning-picker { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; height: auto; padding: 0; border: 0; background: transparent; font-size: 11px; letter-spacing: normal; text-transform: none; color: var(--muted); }
+.reasoning-picker > svg { display: none; }
+.reasoning-picker > span:last-child { width: 100%; min-width: 0; }
+.primer-workbench .reasoning-picker select { width: 100%; min-width: 0; font-size: 12px; color: var(--ink); }
+.agent-controls .reasoning-picker:has(select[aria-label$=" model"]) { grid-column: 1 / -1; grid-row: 2; }
+.primer-workbench .auto-approval { padding: 8px 16px; background: var(--bgColor-muted); flex: none; }
+.primer-workbench .auto-approval > button { font-size: 12px; }
+.primer-workbench .auto-approval p { font-size: 11px; line-height: 1.5; margin-top: 5px; }
+.primer-workbench .chat-scroll { padding: 16px 20px 24px; scrollbar-gutter: stable; }
+.primer-workbench .agent-welcome { min-height: auto; justify-content: flex-start; padding: 0; }
+.primer-workbench .welcome-mark { display: none; }
+.primer-workbench .agent-welcome h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; letter-spacing: normal; }
+.primer-workbench .agent-welcome p { font-size: 13px; line-height: 1.65; }
+.primer-workbench .suggestion-list { gap: 8px; margin-top: 18px; }
+.primer-workbench .suggestion-list button { min-height: 36px; padding: 8px 10px; border-radius: 6px; background: transparent; color: var(--ink); font-size: 12px; line-height: 1.5; }
+.primer-workbench .suggestion-list button svg { flex: none; }
+.primer-workbench .chat-message { margin-bottom: 24px; }
+.primer-workbench .chat-message > span { font-size: 12px; letter-spacing: normal; text-transform: none; gap: 6px; margin-bottom: 8px; color: var(--ink); }
+.primer-workbench .chat-message p { padding: 0; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; background: transparent; color: var(--ink); border: 0; border-radius: 0; }
+.primer-workbench .composer-wrap { padding: 12px 16px; background: var(--bgColor-default); flex: none; }
+.primer-workbench .composer { border-color: var(--control-borderColor-rest); border-radius: 6px; box-shadow: none; background: var(--bgColor-default); }
+.primer-workbench .composer:focus-within { border-color: var(--focus-outlineColor); outline: 1px solid var(--focus-outlineColor); box-shadow: none; }
+.primer-workbench .composer textarea { min-height: 90px; padding: 12px 46px 12px 12px; font-size: 14px; line-height: 1.5; }
+.primer-workbench .send-button { width: 30px; height: 30px; right: 8px; bottom: 8px; border-radius: 6px; background: var(--button-primary-bgColor-rest); color: var(--button-primary-fgColor-rest); }
+.primer-workbench :is(.send-button,.onboarding-button):hover:not(:disabled) { background: var(--button-primary-bgColor-hover); }
+.primer-workbench :is(.send-button,.onboarding-button):active:not(:disabled) { background: var(--button-primary-bgColor-active); }
+.primer-workbench :is(.send-button,.onboarding-button):disabled { background: var(--button-primary-bgColor-disabled); color: var(--button-primary-fgColor-disabled); opacity: 1; }
+.primer-workbench .composer-note { margin-top: 8px; font-size: 11px; line-height: 1.5; text-align: left; color: var(--muted); }
+.primer-workbench .selection-chip { min-height: 32px; font-size: 11px; padding: 7px 8px; border-radius: 6px; flex-wrap: wrap; }
+.primer-workbench .selection-chip span { color: var(--fgColor-accent); font-size: 10px; letter-spacing: normal; text-transform: none; }
+.primer-workbench .selection-chip strong { font-size: 11px; }
+.primer-workbench .selection-chip button { min-width: 24px; min-height: 24px; }
+.primer-workbench .turn-monitor { padding: 10px 16px; background: var(--bgColor-muted); }
+.primer-workbench .turn-monitor-title { font-size: 12px; white-space: normal; }
+.primer-workbench .turn-monitor-time { font-size: 11px; }
+.primer-workbench .turn-stop-button { height: 32px; font-size: 12px; background: var(--bgColor-default); color: var(--fgColor-danger); }
+.primer-workbench .diff-panel { padding: 16px; }
+.primer-workbench .diff-heading { font-size: 14px; }
+.primer-workbench .diff-description { font-size: 13px; line-height: 1.6; }
+.primer-workbench :is(.diff-files button,.diff-actions button) { min-height: 32px; font-size: 12px; }
+.primer-workbench .diff-actions [data-component=text] { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.primer-workbench :is(.diff-reason,.diff-confirmation-delayed,.diff-source-note,.diff-preparing) { font-size: 12px; line-height: 1.6; }
+.primer-workbench :is(.diff-confirmation-delayed strong,.diff-files-heading,.diff-file-copy strong) { font-size: 12px; }
+.primer-workbench :is(.diff-file-copy small,.diff-file-counts,.diff-undo-note) { font-size: 11px; }
+.primer-workbench .diff-file-row.is-active { box-shadow: none; }
+.primer-workbench .paper-check-report { font-size: 13px; line-height: 1.6; }
+.primer-workbench .error-banner { height: auto; min-height: 38px; flex: none; padding: 8px 20px; font-size: 13px; }
+.primer-workbench .error-banner span { white-space: normal; overflow-wrap: anywhere; }
+.primer-workbench .error-banner button { min-width: 28px; min-height: 28px; }
+.primer-workbench :is(.source-empty,.pdf-empty) { font-size: 13px; line-height: 1.65; padding: 24px; }
+.primer-workbench :is(.source-empty strong,.pdf-empty strong) { font-size: 16px; }
+.primer-workbench .skill-picker > svg { display: none; }
+.skill-picker > span:last-child { flex: 1; min-width: 0; }
+.primer-workbench .skill-picker select { height: 30px; font-size: 13px; border: 0; background: transparent; }
+.primer-dialog .workbench-dialog-footer { padding: 16px; background: var(--bgColor-default); }
+.primer-dialog .skill-settings-layout { grid-template-columns: 180px minmax(0,1fr); min-height: 360px; margin: -16px; }
+.primer-dialog .skill-settings-nav { background: var(--bgColor-muted); padding: 12px 8px; }
+.primer-dialog .skill-settings-nav button { border-radius: 6px; padding: 10px 8px; }
+.primer-dialog .skill-settings-nav button:is(:hover,[aria-pressed=true]) { background: var(--bgColor-neutral-muted); color: var(--ink); }
+.primer-dialog .skill-settings-nav button[aria-pressed=true] small { color: var(--muted); }
+.primer-dialog .skill-settings-detail { padding: 20px; }
+.primer-dialog .skill-detail-heading h3 { font-size: 15px; }
+.primer-dialog .skill-settings-fields { grid-template-columns: minmax(0,1fr); gap: 16px; }
+.primer-dialog .skill-settings-fields input, .primer-dialog .skill-settings-fields textarea { background: var(--bgColor-default); border-color: var(--control-borderColor-rest); border-radius: 6px; }
+.primer-dialog .skill-settings-fields select, .primer-dialog .skill-settings-mobile-picker select { margin: 0; min-height: 30px; height: 30px; padding-block: 0; border: 0; background: transparent; }
+.primer-dialog .skill-settings-fields label > span:last-of-type { display: block; margin-top: 6px; }
+.primer-dialog .skill-info-content { padding: 0; }
+.primer-dialog .skill-info-content > p { font-size: 14px; line-height: 1.65; }
+.primer-dialog .skill-info-policy { margin-top: 20px; padding-top: 16px; }
+.paper-files-browser { padding: 0; min-height: 200px; }
+.primer-dialog .paper-root-card { margin: 0 0 12px; width: 100%; padding: 10px; background: var(--bgColor-muted); border-radius: 6px; }
+.primer-dialog .paper-root-card small { font-size: 11px; text-transform: none; letter-spacing: normal; }
+.primer-dialog .paper-root-card strong { font-size: 12px; }
+.primer-dialog .tree { padding: 0; }
+.primer-dialog .tree-row { min-height: 32px; }
+.primer-dialog :is(.tree-label,.tree-empty) { font-size: 13px; }
+.primer-workbench .onboarding-overlay { inset: 60px 0 0; background: var(--bgColor-default); backdrop-filter: none; }
+.primer-workbench .onboarding-card { width: min(640px,100%); padding: 32px; border: 0; box-shadow: none; background: transparent; }
+.primer-workbench .onboarding-card::after { display: none; }
+.primer-workbench .onboarding-card h1 { margin: 0; font-size: 28px; line-height: 1.3; font-weight: 600; letter-spacing: normal; }
+.primer-workbench .onboarding-card p { font-size: 14px; line-height: 1.65; }
+.primer-workbench .onboarding-button { min-height: 40px; margin-top: 24px; font-size: 14px; border-radius: 6px; background: var(--button-primary-bgColor-rest); color: var(--button-primary-fgColor-rest); }
+.primer-workbench .onboarding-points { font-size: 12px; gap: 12px 18px; }
+.primer-workbench .companion-warning { font-size: 12px; line-height: 1.5; }
+.mobile-workspace-nav { display: none; }
+@media (max-width: 1250px) {
+  .primer-workbench .topbar { padding-inline: 12px; gap: 8px; }
+  .primer-workbench .brand strong, .primer-workbench .connection-pill { display: none; }
+  .primer-workbench .workspace-picker { max-width: 180px; }
+  .workspace-pane-heading, .paper-toolbar, .primer-workbench .agent-header, .agent-controls, .primer-workbench .composer-wrap { padding-inline: 10px; }
+  .primer-workbench .chat-scroll { padding-inline: 12px; }
+  .paper-format { display: none; }
+  .main-file-picker > span:last-child { max-width: 120px; }
+}
+@media (max-width: 760px) {
+  .primer-workbench .topbar { height: 54px; flex-basis: 54px; gap: 6px; padding-inline: 12px; }
+  .primer-workbench .brand, .desktop-pane-toggles, .primer-workbench .topbar-spacer { display: none; }
+  .primer-workbench .workspace-picker { flex: 1; max-width: none; }
+  .primer-workbench .compile-button { min-width: 80px; }
+  .mobile-workspace-nav { display: block; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .primer-workbench .workspace-grid { display: block; position: relative; }
+  .primer-workbench .resize-handle { display: none; }
+  .primer-workbench :is(.source-tool-panel,.document-workspace,.agent-panel) { position: absolute; inset: 0; height: 100%; visibility: visible; }
+  .primer-workbench.mobile-source :is(.document-workspace,.agent-panel),
+  .primer-workbench.mobile-paper :is(.source-tool-panel,.agent-panel),
+  .primer-workbench.mobile-agent :is(.source-tool-panel,.document-workspace) { display: none; }
+  .pane-close { display: none; }
+  .workspace-pane-heading, .paper-toolbar { min-height: 44px; height: 44px; }
+  .primer-workbench :is(.source-gutter,.source-editor textarea) { font-size: 13px; }
+  .primer-workbench .composer textarea, .primer-dialog :is(input,select,textarea) { font-size: 16px; }
+  .primer-workbench .pdf-pages { padding-inline: 16px; }
+  .primer-workbench .onboarding-overlay { inset: 102px 0 0; padding: 16px; overflow: auto; }
+  .primer-workbench .onboarding-card { padding: 20px 8px; }
+  .primer-workbench .onboarding-card h1 { font-size: 24px; }
+  .primer-workbench .onboarding-points { flex-direction: column; }
+  .primer-dialog .skill-settings-layout { display: block; margin: 0; min-height: 0; }
+  .primer-dialog .skill-settings-nav { display: none; }
+  .primer-dialog .skill-settings-mobile-picker { display: block; padding: 0 0 16px; }
+  .primer-dialog .skill-settings-detail { padding: 0; }
+  .primer-dialog .workbench-dialog-footer { gap: 8px; padding: 12px; }
+}
+@media (max-height: 740px) {
+  .primer-workbench .agent-panel { overflow-y: auto; }
+  .primer-workbench .chat-scroll { flex: 1 0 140px; }
+  .primer-workbench .diff-review { flex: 1 0 280px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
